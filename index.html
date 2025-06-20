@@ -65,6 +65,7 @@
   <div id="endOverlay">
     <h1 id="endMsg"></h1>
     <button id="rematch">Rematch</button>
+    <button id="respawnButton" style="display: none;">Respawn</button>
   </div>
 
   <!-- HUD -->
@@ -90,6 +91,7 @@
   // — Virtual World Constants —
   const WORLD_WIDTH  = 2400;
   const WORLD_HEIGHT = 2400;
+  const CAMERA_ZOOM_OUT_FACTOR = 0.75; // Less than 1 zooms out, shows more.
 
   // — Canvas & Matter Setup —
   const canvas = document.getElementById('game');
@@ -97,16 +99,16 @@
   let cw=window.innerWidth, ch=window.innerHeight;
   canvas.width = cw; canvas.height = ch;
 
-  const { Engine, World, Bodies, Body, Events } = Matter;
+  const { Engine, World, Bodies, Body, Events, Vector } = Matter;
   const engine = Engine.create(), world = engine.world;
-  world.gravity.y = 0;
+  world.gravity.y = 0; // Original Matter.js gravity setting
 
   // — Compute uniform scale & letterbox offsets —
   let scale=1, xOffset=0, yOffset=0;
   function updateViewport(){
     cw=window.innerWidth; ch=window.innerHeight;
     // Which dimension constrains the world?
-    scale = Math.min(cw/WORLD_WIDTH, ch/WORLD_HEIGHT);
+    scale = Math.min(cw/WORLD_WIDTH, ch/WORLD_HEIGHT) * CAMERA_ZOOM_OUT_FACTOR;
     // compute letterboxing centering
     xOffset = (cw - WORLD_WIDTH * scale) / 2;
     yOffset = (ch - WORLD_HEIGHT * scale) / 2;
@@ -134,10 +136,10 @@
 
   // — World Borders (fixed coords) —
   const borders = [
-    Bodies.rectangle(WORLD_WIDTH/2, -10, WORLD_WIDTH, 20, { isStatic:true }),
-    Bodies.rectangle(WORLD_WIDTH/2, WORLD_HEIGHT+10, WORLD_WIDTH, 20, { isStatic:true }),
-    Bodies.rectangle(-10, WORLD_HEIGHT/2, 20, WORLD_HEIGHT, { isStatic:true }),
-    Bodies.rectangle(WORLD_WIDTH+10, WORLD_HEIGHT/2, 20, WORLD_HEIGHT, { isStatic:true })
+      Bodies.rectangle(WORLD_WIDTH/2, -10, WORLD_WIDTH, 20, { isStatic:true }),
+      Bodies.rectangle(WORLD_WIDTH/2, WORLD_HEIGHT+10, WORLD_WIDTH, 20, { isStatic:true }),
+      Bodies.rectangle(-10, WORLD_HEIGHT/2, 20, WORLD_HEIGHT, { isStatic:true }),
+      Bodies.rectangle(WORLD_WIDTH+10, WORLD_HEIGHT/2, 20, WORLD_HEIGHT, { isStatic:true })
   ];
   World.add(world, borders);
 
@@ -180,11 +182,11 @@
   let localPlayerSpawnIndex = 0; // Local player always takes the first spawn point
 
   const player = Bodies.rectangle(
-    spawnPoints[localPlayerSpawnIndex].x,
-    spawnPoints[localPlayerSpawnIndex].y,
-    size, size, { restitution:0.2, frictionAir:0.1 }
+      spawnPoints[localPlayerSpawnIndex].x,
+      spawnPoints[localPlayerSpawnIndex].y,
+      size, size, { restitution:0.2, frictionAir:0.1 } // Original properties
   );
-  World.add(world, player); // Add local player to world
+  World.add(world, player);
 
   // Initial camera position update was missing in the previous attempt; it's part of applyCamera or cam object init.
   // Let's ensure cam is initialized correctly. The cam object is already global.
@@ -192,6 +194,7 @@
   cam.x = player.position.x;
   cam.y = player.position.y;
 
+  let localPlayerState = 'alive'; // Player state: 'alive', 'dead'
   let opponents = {}; // Stores opponent data, keyed by peerId
   let peer; // Local PeerJS instance
   let nextOpponentSpawnIndex = 1; // Index for the next opponent's spawn point (starts from 1 as player takes 0)
@@ -214,15 +217,15 @@
       blockBody = Bodies.rectangle(pixelX, pixelY, blockSize, blockSize, {
         restitution: 0.8,
         frictionAir: 0.02,
-        density: 0.002,
-        _isInteractive: true, // Custom property for identification
-        render: { fillStyle: '#888' } // Default color, can be changed in render loop
+        density: 0.002, // Example Matter.js property
+        _isInteractive: true, 
+        render: { fillStyle: '#888' } 
       });
     } else {
       blockBody = Bodies.rectangle(pixelX, pixelY, blockSize, blockSize, {
         isStatic: true,
-        _isInteractive: false, // Custom property for identification
-        render: { fillStyle: '#555' } // Default color for static, can be changed
+        _isInteractive: false, 
+        render: { fillStyle: '#555' }
       });
     }
 
@@ -238,37 +241,40 @@
   function removeBullet(id){
     const idx = bullets.findIndex(b=>b._id===id);
     if(idx>=0){
-      World.remove(world, bullets[idx]);
+      World.remove(world, bullets[idx]); // Reverted
       bullets.splice(idx,1);
     }
   }
 
   function shoot(isLocal){
     const angle = Math.atan2(lastRight.y, lastRight.x);
-    const bid   = bulletCounter++;
+    // const bid   = bulletCounter++; // Original
+    const bid = (peer && peer.id ? peer.id + "_" : "local_") + bulletCounter++; // Keep unique ID for now
     const bx = player.position.x + Math.cos(angle)*(size/2+5);
     const by = player.position.y + Math.sin(angle)*(size/2+5);
-    const bullet = Bodies.circle(bx, by, 5, { restitution:0.8, frictionAir:0.02, density:0.001 });
+    const bullet = Bodies.circle(bx, by, 5, { restitution:0.8, frictionAir:0.02, density:0.001 }); // Matter.js
     bullet._id = bid;
-    Body.setVelocity(bullet, { x:Math.cos(angle)*15, y:Math.sin(angle)*15 });
+    bullet.shooterId = peer ? peer.id : "local"; // Keep shooterId logic
+    Body.setVelocity(bullet, { x:Math.cos(angle)*15, y:Math.sin(angle)*15 }); // Matter.js
     bullets.push(bullet);
-    World.add(world, bullet);
+    World.add(world, bullet); // Matter.js
     // schedule auto‑dispersion
-    setTimeout(()=>removeBullet(bid), 3500);
-    // network
-    if(isLocal) send({ shoot:true, bullet:{ id:bid, x:bx, y:by, vx:bullet.velocity.x, vy:bullet.velocity.y }});
+    setTimeout(()=>removeBullet(bullet._id), 3500);
+    // network - ensure vx, vy are from Matter.js body.velocity
+    if(isLocal && peer) send({ shoot:true, bullet:{ id:bullet._id, x:bx, y:by, vx:bullet.velocity.x, vy:bullet.velocity.y, shooterId: bullet.shooterId }});
     // feedback
     playBeep(600,0.05);
     navigator.vibrate?.(20);
   }
 
-  function spawnRemoteBullet(bd){
+  function spawnRemoteBullet(bd, shooterId){ // shooterId is the sender of the shoot message
     if(bullets.some(b=>b._id===bd.id)) return;
-    const bullet = Bodies.circle(bd.x, bd.y, 5, { restitution:0.8, frictionAir:0.02, density:0.001 });
+    const bullet = Bodies.circle(bd.x, bd.y, 5, { restitution:0.8, frictionAir:0.02, density:0.001 }); // Matter.js
     bullet._id = bd.id;
-    Body.setVelocity(bullet, { x:bd.vx, y:bd.vy });
+    bullet.shooterId = shooterId; // Assign from passed shooterId
+    Body.setVelocity(bullet, { x:bd.vx, y:bd.vy }); // Matter.js
     bullets.push(bullet);
-    World.add(world, bullet);
+    World.add(world, bullet); // Matter.js
     setTimeout(()=>removeBullet(bd.id), 3500);
   }
 
@@ -333,9 +339,9 @@
     if (!peer || !peer.id) return; // Ensure peer is initialized
     const payload = Object.assign({
       senderId: peer.id,
-      pos: [player.position.x, player.position.y],
-      angle: player.angle,
-      // blocks: blocks.map(b=>({ id:b._id, x:b.position.x, y:b.position.y, angle:b.angle })), // Keep if needed, optimize later
+      pos: [player.position.x, player.position.y], // Matter.js position
+      angle: player.angle, // Matter.js body angle
+      // blocks: blocks.map(b=>({ id:b._id, x:b.position.x, y:b.position.y, angle:b.angle })), // Original block sync example
       // health: myHealth // Health is often sent specifically on change
     }, customData);
 
@@ -353,8 +359,8 @@
     }
     const opponent = opponents[senderId];
 
-    if(data.pos) Body.setPosition(opponent.body, { x:data.pos[0], y:data.pos[1] });
-    if(data.angle != null) Body.setAngle(opponent.body, data.angle);
+    if(data.pos && opponent.body) Body.setPosition(opponent.body, { x:data.pos[0], y:data.pos[1] }); // Reverted
+    if(data.angle != null && opponent.body) Body.setAngle(opponent.body, data.angle); // Reverted, assumes opponent.body.angle is used
 
     if (data.healthUpdate) { // Received a health update from a player
       const targetPlayerId = data.healthUpdate.targetId;
@@ -389,47 +395,75 @@
       // Opponent processes their own damage.
     }
 
+    if (data.playerState && opponents[data.playerState.targetId]) {
+        const targetOpponent = opponents[data.playerState.targetId];
+        targetOpponent.state = data.playerState.state;
+        const opponentBody = targetOpponent.body;
+        if (opponentBody) {
+            if (data.playerState.state === 'dead') {
+                Body.setStatic(opponentBody, true); // Corrected for Matter.js
+                opponentBody.isSensor = true; // Make dead opponent's body a sensor
+            } else if (data.playerState.state === 'alive') {
+                Body.setStatic(opponentBody, false); // Corrected for Matter.js
+                opponentBody.isSensor = false; // Restore as non-sensor
+                // Position will be set by pos sync or a specific respawn message part
+            }
+        }
+        console.log(`Opponent ${data.playerState.targetId} state changed to: ${data.playerState.state}`);
+    }
+
     if(data.rematchSignal && senderId !== peer.id) { // Received rematch signal from an opponent
       console.log(`Received rematch signal from ${senderId}. Resetting game state.`);
       // Reset local player state to their initial spawn point
-      myHealth = 5;
+      myHealth = 5; // Max health
+      localPlayerState = 'alive'; // Set local player to alive
+      if(player) {
+        Body.setStatic(player, false); // Matter.js
+        player.isSensor = false; // Restore as non-sensor
+      }
+
       document.getElementById('myHealth').value = myHealth;
-      // Kills typically persist through rematches in a session, or reset if game rules dictate
-      // document.getElementById('myKills').textContent = '0'; // Uncomment if kills should reset
-      Body.setPosition(player, { x: spawnPoints[localPlayerSpawnIndex].x, y: spawnPoints[localPlayerSpawnIndex].y });
-      Body.setVelocity(player,{x:0,y:0});
-      cam.x = player.position.x; cam.y = player.position.y; // Recenter camera
+      if(player) Body.setPosition(player, { x: spawnPoints[localPlayerSpawnIndex].x, y: spawnPoints[localPlayerSpawnIndex].y });
+      if(player) Body.setVelocity(player, { x:0, y:0 });
+      if(player) Body.setAngularVelocity(player, 0);
+      if(player) {cam.x = player.position.x; cam.y = player.position.y;} // Recenter camera
 
       // Reset the signaling opponent's visual state to their spawn point
-      const opponent = opponents[senderId];
-      if (opponent) {
-        opponent.health = 5;
-        opponent.isDefeated = false;
+      const sigOpponent = opponents[senderId]; 
+      if (sigOpponent) {
+        sigOpponent.health = 5;
+        sigOpponent.isDefeated = false;
+        sigOpponent.state = 'alive'; // Set opponent to alive
         const healthBar = document.getElementById(`health-${senderId}`);
         if (healthBar) healthBar.value = 5;
-        if (opponent.body && opponent.spawnPoint) {
-            Body.setPosition(opponent.body, {x: opponent.spawnPoint.x, y: opponent.spawnPoint.y});
-            Body.setVelocity(opponent.body, {x: 0, y: 0});
-        } else if (opponent.body) { // Fallback if spawnPoint somehow wasn't stored
-             Body.setPosition(opponent.body, {x: spawnPoints[1].x, y: spawnPoints[1].y}); // Default to a known fallback
-             Body.setVelocity(opponent.body, {x: 0, y: 0});
+        if (sigOpponent.body) {
+            Body.setStatic(sigOpponent.body, false); // Matter.js
+            sigOpponent.body.isSensor = false; // Restore as non-sensor
+            const opSpawn = sigOpponent.spawnPoint || spawnPoints[1] || {x: WORLD_WIDTH - size, y: WORLD_HEIGHT/2}; // Fallback spawn
+            Body.setPosition(sigOpponent.body, { x: opSpawn.x, y: opSpawn.y });
+            Body.setVelocity(sigOpponent.body, { x:0, y:0 });
+            Body.setAngularVelocity(sigOpponent.body, 0);
         }
       }
       // Note: All players receive the signal and reset themselves.
       // The positions of other non-signaling opponents will be updated via their regular position sync.
 
-      bullets.forEach(b=>World.remove(world,b)); // Clear all bullets
+      bullets.forEach(b => World.remove(world, b)); // Reverted
       bullets.length=0;
       endOv.style.display='none'; // Hide end overlay if it was shown
     }
 
-    if(data.shoot && data.bullet) spawnRemoteBullet(data.bullet, data.senderId);
+    if(data.shoot && data.bullet) spawnRemoteBullet(data.bullet, data.bullet.shooterId || data.senderId); // Ensure shooterId is passed
 
     // Block updates (less likely to change per player, but structure is here)
-    if(data.blocks){
+    if(data.blocks){ // Block positions are also Vec3 in Cannon.js, assuming Z is blockSize/2
       data.blocks.forEach(bd=>{
         const b=blocks.find(x=>x._id===bd.id);
-        if(b){ Body.setPosition(b,{x:bd.x,y:bd.y}); Body.setAngle(b,bd.angle); }
+        if(b){ 
+          b.position.set(bd.x,bd.y, blockSize/2); 
+          // For angle, Cannon.js uses quaternions. If bd.angle is Euler Z:
+          b.quaternion.setFromEuler(0, 0, bd.angle || 0); 
+        }
       });
     }
   }
@@ -493,9 +527,10 @@
       body: newOpponentBody,
       health: 5, // Initial health
       conn: conn,
-      angle: 0,
+      // angle: 0, // Replaced by aimAngle on body itself
       spawnPoint: opponentSpawnPoint, // Store the spawn point
-      isDefeated: false // To track if kill has been counted for this opponent
+      isDefeated: false, // To track if kill has been counted for this opponent
+      state: 'alive' // Initial state for opponent
     };
 
     // Add health bar for new opponent
@@ -567,6 +602,9 @@
     });
   }
 
+// — Bullet Collision Logic (Cannon.js) — // This is being removed.
+// function bulletCollisionHandler(event) { ... } 
+
 
   function playStream(stream, peerId){
     const audioElId = `audio_${peerId}`;
@@ -591,12 +629,24 @@
     document.getElementById('myHealth').value = myHealth;
     cam.shake = 20; navigator.vibrate?.(100);
 
-    // Inform others about my new health
-    send({ healthUpdate: { targetId: peer.id, newHealth: myHealth, instigatorId: instigatorId } });
-
     if(myHealth <= 0) {
+      localPlayerState = 'dead';
       showEnd('You Died');
       // The instigator (if any) will see the healthUpdate and increment their kill count.
+      
+      // Make player's body static for Matter.js
+      if (player && !player.isStatic) { // Check if player body exists and not already static
+          Body.setStatic(player, true);
+          player.isSensor = true; // Make dead player's body a sensor
+      }
+      // Inform others about my new health AND state
+      send({ 
+          healthUpdate: { targetId: peer.id, newHealth: myHealth, instigatorId: instigatorId },
+          playerState: { targetId: peer.id, state: 'dead' } 
+      });
+    } else {
+      // Inform others about my new health (still alive)
+      send({ healthUpdate: { targetId: peer.id, newHealth: myHealth, instigatorId: instigatorId } });
     }
   }
 
@@ -612,64 +662,68 @@
   // }
   // This logic is now integrated into the healthUpdate part of handleData.
 
-  Events.on(engine,'collisionStart',ev=>{
+  Events.on(engine,'collisionStart',ev=>{ // Restoring Matter.js collision logic
     ev.pairs.forEach(p=>{
       const [A,B] = [p.bodyA, p.bodyB];
-      // Local player hit by a bullet. The bullet itself doesn't know its instigator here.
-      // The instigator info will come from the shooter's `shoot` message if we add it there.
-      // For now, local damage doesn't record instigator directly, relies on network message.
-      if(bullets.includes(A) && B === player){ removeBullet(A._id); damagePlayer(A.shooterId || null); } // Assume bullet carries shooterId
-      if(bullets.includes(B) && A === player){ removeBullet(B._id); damagePlayer(B.shooterId || null); } // Assume bullet carries shooterId
+      // Local player hit by a bullet.
+      // Assumes bullet has shooterId property
+      if (player && !player.isSensor) { // Check if player is not a sensor
+        if(bullets.includes(A) && B === player){ removeBullet(A._id); damagePlayer(A.shooterId || null); } 
+        if(bullets.includes(B) && A === player){ removeBullet(B._id); damagePlayer(B.shooterId || null); } 
+      }
 
       // Opponent hit by a bullet (sent by local player)
       Object.values(opponents).forEach(op => {
-        if (op && op.body) {
+        if (op && op.body && !op.body.isSensor) { // Check if opponent body exists and is not a sensor
           let bulletHit = null;
-          if (bullets.includes(A) && B === op.body) bulletHit = A;
+          // let hitOpponentBody = null; // Not strictly needed if only op.body is used for checks
+          if (bullets.includes(A) && B === op.body) bulletHit = A; 
           if (bullets.includes(B) && A === op.body) bulletHit = B;
 
           if (bulletHit) {
             removeBullet(bulletHit._id);
-            // Send a damage event. The recipient (victim) will process it, update their health,
-            // and then broadcast their new health. The instigator will get a kill if health reaches 0.
-            console.log(`Local player's bullet hit opponent ${op.conn.peer}. Sending damage event.`);
-            send({ damageEvent: { victimId: op.conn.peer, instigatorId: peer.id, damageAmount: 1, bulletId: bulletHit._id } });
+            // Send a damage event if this client's bullet hit an opponent
+            if (bulletHit.shooterId === (peer ? peer.id : "local")) { 
+               send({ damageEvent: { victimId: op.conn.peer, instigatorId: (peer ? peer.id : "local"), damageAmount: 1, bulletId: bulletHit._id } });
+            }
           }
         }
       });
     });
-    document.getElementById('myKills').textContent = myKills;
+    // This line was present in an older version of collision handler. If myKills is purely client-side based on direct hits, it might be okay.
+    // However, kills are now determined by receiving a healthUpdate where newHealth <=0 and this client was the instigator.
+    // document.getElementById('myKills').textContent = myKills; 
   });
 
-  // In spawnRemoteBullet, tag bullet with shooterId
-  function spawnRemoteBullet(bd, shooterId){ // shooterId is the sender of the shoot message
-    if(bullets.some(b=>b._id===bd.id)) return;
-    const bullet = Bodies.circle(bd.x, bd.y, 5, { restitution:0.8, frictionAir:0.02, density:0.001 });
-    bullet._id = bd.id;
-    bullet.shooterId = shooterId; // Tag the bullet with the ID of the player who shot it
-    Body.setVelocity(bullet, { x:bd.vx, y:bd.vy });
-    bullets.push(bullet);
-    World.add(world, bullet);
-    setTimeout(()=>removeBullet(bd.id), 3500);
-  }
+  // // In spawnRemoteBullet, tag bullet with shooterId // OLD MATTER.JS FUNCTION - REMOVED
+  // function spawnRemoteBullet(bd, shooterId){ 
+  //   if(bullets.some(b=>b._id===bd.id)) return;
+  //   const bullet = Bodies.circle(bd.x, bd.y, 5, { restitution:0.8, frictionAir:0.02, density:0.001 });
+  //   bullet._id = bd.id;
+  //   bullet.shooterId = shooterId; 
+  //   Body.setVelocity(bullet, { x:bd.vx, y:bd.vy });
+  //   bullets.push(bullet);
+  //   World.add(world, bullet);
+  //   setTimeout(()=>removeBullet(bd.id), 3500);
+  // }
 
-  // Modify shoot function to include shooterId (local player's ID) in bullet data for network transmission
-  function shoot(isLocal){
-    const angle = Math.atan2(lastRight.y, lastRight.x);
-    const bid   = peer.id + "_" + bulletCounter++; // Ensure unique bullet ID across network
-    const bx = player.position.x + Math.cos(angle)*(size/2+5);
-    const by = player.position.y + Math.sin(angle)*(size/2+5);
-    const bullet = Bodies.circle(bx, by, 5, { restitution:0.8, frictionAir:0.02, density:0.001 });
-    bullet._id = bid;
-    bullet.shooterId = peer.id; // Tagging local bullets too for consistency if needed
-    Body.setVelocity(bullet, { x:Math.cos(angle)*15, y:Math.sin(angle)*15 });
-    bullets.push(bullet);
-    World.add(world, bullet);
-    setTimeout(()=>removeBullet(bid), 3500);
-    if(isLocal) send({ shoot:true, bullet:{ id:bid, x:bx, y:by, vx:bullet.velocity.x, vy:bullet.velocity.y, shooterId: peer.id }});
-    playBeep(600,0.05);
-    navigator.vibrate?.(20);
-  }
+  // // Modify shoot function to include shooterId (local player's ID) // OLD MATTER.JS FUNCTION - REMOVED
+  // function shoot(isLocal){
+  //   const angle = Math.atan2(lastRight.y, lastRight.x);
+  //   const bid   = peer.id + "_" + bulletCounter++; 
+  //   const bx = player.position.x + Math.cos(angle)*(size/2+5);
+  //   const by = player.position.y + Math.sin(angle)*(size/2+5);
+  //   const bullet = Bodies.circle(bx, by, 5, { restitution:0.8, frictionAir:0.02, density:0.001 });
+  //   bullet._id = bid;
+  //   bullet.shooterId = peer ? peer.id : "local"; 
+  //   Body.setVelocity(bullet, { x:Math.cos(angle)*15, y:Math.sin(angle)*15 });
+  //   bullets.push(bullet);
+  //   World.add(world, bullet);
+  //   setTimeout(()=>removeBullet(bullet._id), 3500); 
+  //   if(isLocal && peer) send({ shoot:true, bullet:{ id:bullet._id, x:bx, y:by, vx:bullet.velocity.x, vy:bullet.velocity.y, shooterId: bullet.shooterId }}); 
+  //   playBeep(600,0.05);
+  //   navigator.vibrate?.(20);
+  // }
 
   // Modify handleData for 'shoot' event to pass shooterId to spawnRemoteBullet
   // In handleData:
@@ -695,78 +749,161 @@
     // send({}); // Initial send might not be needed if using greeting or relying on first update
   };
   const endOv=document.getElementById('endOverlay'), endMsg=document.getElementById('endMsg');
-  function showEnd(msg){ endMsg.textContent=msg; endOv.style.display='flex'; }
+  function showEnd(msg){ 
+      endMsg.textContent=msg; 
+      endOv.style.display='flex'; 
+      if (msg === 'You Died') {
+          document.getElementById('rematch').style.display = 'none'; // Hide rematch if dead
+          document.getElementById('respawnButton').style.display = 'inline-block'; // Show respawn
+      } else {
+          document.getElementById('rematch').style.display = 'inline-block'; // Show rematch for other end conditions
+          document.getElementById('respawnButton').style.display = 'none';
+      }
+  }
 
   document.getElementById('rematch').onclick=()=>{
     myHealth = 5; myKills = 0; // Reset local player
+    localPlayerState = 'alive';
+    if(player) {
+        Body.setStatic(player, false); // Matter.js
+        player.isSensor = false; // Restore as non-sensor
+    }
+
     document.getElementById('myHealth').value = myHealth;
     document.getElementById('myKills').textContent = '0';
-    Body.setPosition(player,{x:size,y:WORLD_HEIGHT/2});
-    Body.setVelocity(player,{x:0,y:0});
+    if(player) {
+      Body.setPosition(player, { x: spawnPoints[localPlayerSpawnIndex].x, y: spawnPoints[localPlayerSpawnIndex].y }); 
+      Body.setVelocity(player, { x:0, y:0 }); 
+      Body.setAngularVelocity(player, 0); 
+    }
 
     // For opponents, their health reset will be communicated via network messages.
     // Or, a specific "rematch" signal could be sent.
-    Object.values(opponents).forEach(op => {
-      if (op && op.body) { // Check if opponent and its body exist
-        Body.setPosition(op.body, {x: WORLD_WIDTH - size, y: WORLD_HEIGHT / 2}); // Reset position visually
-        Body.setVelocity(op.body, {x: 0, y: 0});
+    Object.keys(opponents).forEach(opId => { 
+      const op = opponents[opId];
+      if (op && op.body) { 
+        op.state = 'alive'; // Opponent is also alive on rematch
+        Body.setStatic(op.body, false); // Matter.js
+        op.body.isSensor = false; // Restore as non-sensor
+        const opSpawnPoint = op.spawnPoint || { x: WORLD_WIDTH - size, y: WORLD_HEIGHT / 2 }; 
+        Body.setPosition(op.body, { x: opSpawnPoint.x, y: opSpawnPoint.y }); 
+        Body.setVelocity(op.body, { x:0, y:0 }); 
+        Body.setAngularVelocity(op.body, 0); 
         const healthBar = document.getElementById(`health-${op.conn.peer}`);
         if (healthBar) healthBar.value = 5;
         op.health = 5;
-        op.isDefeated = false; // Reset defeated state
+        op.isDefeated = false; 
       }
     });
-    send({ rematchSignal: true }); // Inform others about the rematch
+    // Send rematch signal along with current player's alive state
+    send({ 
+        rematchSignal: true, 
+        playerState: { targetId: peer ? peer.id : 'local', state: 'alive' },
+        pos: player ? [player.position.x, player.position.y] : [spawnPoints[localPlayerSpawnIndex].x, spawnPoints[localPlayerSpawnIndex].y],
+        healthUpdate: {targetId: peer ? peer.id : 'local', newHealth: myHealth }
+        // shooterId might not be needed in rematchSignal itself, but rather when bullets are created
+    }); 
 
-    bullets.forEach(b=>World.remove(world,b)); // Clear local bullets
+    bullets.forEach(b => World.remove(world, b)); // Reverted
     bullets.length=0;
     endOv.style.display='none';
     send({ health:myHealth });
   };
 
+  document.getElementById('respawnButton').onclick = () => {
+      if (localPlayerState !== 'dead') return; // Only allow respawn if dead
+
+      localPlayerState = 'alive';
+      myHealth = 5; // Reset health (use max health constant if available)
+      document.getElementById('myHealth').value = myHealth;
+
+      // Restore player body physics
+      if (player) { // Ensure player body exists
+        Body.setStatic(player, false); // Matter.js
+        player.isSensor = false; // Restore as non-sensor
+      }
+
+      // Move player to a spawn point
+      const spawnPoint = spawnPoints[localPlayerSpawnIndex]; // Or a random one
+      if (player && spawnPoint) { // Ensure both exist
+        Body.setPosition(player, { x: spawnPoint.x, y: spawnPoint.y });
+        Body.setVelocity(player, { x:0, y:0 });
+        Body.setAngularVelocity(player, 0);
+      }
+            
+      // Update camera
+      if (player) { // Ensure player exists for camera update
+        cam.x = player.position.x;
+        cam.y = player.position.y;
+      }
+
+      // Send respawn state to others
+      if (peer && player) { // Ensure peer and player exist for sending data
+        send({ 
+            playerState: { targetId: peer.id, state: 'alive' },
+            pos: [player.position.x, player.position.y], // Send current position
+            healthUpdate: { targetId: peer.id, newHealth: myHealth } // Send current health
+        });
+      }
+            
+      endOv.style.display='none'; // Hide the overlay
+      document.getElementById('rematch').style.display = 'inline-block'; // Restore rematch button visibility
+  };
+
   function update(){
-    Body.setVelocity(player,{ x:leftStick.x*6, y:leftStick.y*6 });
+    Body.setVelocity(player,{ x:leftStick.x*6, y:leftStick.y*6 }); // Reverted
+    
+    // player.aimAngle update removed, assuming player.angle (physics body angle) will be used or aiming is visual only.
+    // If aiming needs to rotate the physics body, Body.setAngle(player, newAngle) would be used here.
+    // For now, sticking to original Matter.js behavior where player.angle is physics driven.
+
     cam.x=player.position.x; cam.y=player.position.y;
-    Engine.update(engine,1000/60);
+    Engine.update(engine,1000/60); // Reverted
     send({});
     render();
     requestAnimationFrame(update);
   }
 
+  // const euler = new CANNON.Vec3(); // Removed as it's for Cannon.js quaternions
   function render(){
     applyCamera();
     // draw blocks
     blocks.forEach(b=>{
       ctx.save();
       ctx.translate(b.position.x, b.position.y);
-      ctx.rotate(b.angle);
-      // Differentiate color based on custom property or actual static status
+      ctx.rotate(b.angle); // Reverted to Matter.js angle
+      
+      // Color logic based on _isInteractive or isStatic (original way)
       if (b._isInteractive) {
-        ctx.fillStyle = '#888'; // Interactive blocks
-      } else if (b.isStatic) {
-        ctx.fillStyle = '#555'; // Static blocks
-      } else {
-        ctx.fillStyle = '#AAA'; // Default, if any other type
+        ctx.fillStyle = '#888'; 
+      } else if (b.isStatic) { // Matter.js uses isStatic
+        ctx.fillStyle = '#555'; 
+      } else { 
+        ctx.fillStyle = '#AAA'; // Fallback
       }
-      const renderSize = b.isStatic ? blockSize : (b.render.sprite && b.render.sprite.xScale ? blockSize * b.render.sprite.xScale : blockSize); // Use blockSize, assuming 60x60 was from old code
+      // Original renderSize logic might be needed if it varied for non-static blocks
+      const renderSize = b.isStatic ? blockSize : (b.render && b.render.sprite && b.render.sprite.xScale ? blockSize * b.render.sprite.xScale : blockSize);
       ctx.fillRect(-renderSize/2, -renderSize/2, renderSize, renderSize);
       ctx.restore();
     });
     // draw players
     // Draw local player
-    ctx.save();
-    ctx.translate(player.position.x, player.position.y);
-    ctx.rotate(player.angle);
-    ctx.fillStyle = '#4af'; // Local player color
-    ctx.fillRect(-size/2, -size/2, size, size);
-    ctx.restore();
+    if (localPlayerState === 'alive') {
+        ctx.save();
+        ctx.translate(player.position.x, player.position.y);
+        ctx.rotate(player.angle); // Reverted to Matter.js player.angle
+        ctx.fillStyle = '#4af'; // Local player color
+        ctx.fillRect(-size/2, -size/2, size, size);
+        ctx.restore();
+    }
 
     // Draw opponents
     Object.values(opponents).forEach(op => {
-      if (op && op.body) { // Check if opponent and its body exist
+      // Check if opponent, its body, and its state exist, and if state is not 'dead'
+      if (op && op.body && op.state !== 'dead') { 
         ctx.save();
         ctx.translate(op.body.position.x, op.body.position.y);
-        ctx.rotate(op.body.angle); // Use op.body.angle if available, or op.angle if synced separately
+        ctx.rotate(op.body.angle); // Reverted to Matter.js op.body.angle
         ctx.fillStyle = '#fa4'; // Opponent color
         ctx.fillRect(-size/2, -size/2, size, size);
         ctx.restore();
