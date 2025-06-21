@@ -42,10 +42,39 @@
     /* Joystick zones */
     .joystick-zone { position:absolute; z-index:5; bottom:20px; }
     #leftZone { left:20px; } #rightZone{ right:20px; }
+    /* Item Shop Styling */
+    #shopItemsContainer .shop-item {
+      background: #333;
+      border: 1px solid #555;
+      padding: 10px 20px;
+      margin: 5px;
+      border-radius: 5px;
+      cursor: pointer;
+      font-size: 1.2em;
+      text-align: center; /* Center text in items */
+    }
+    #shopItemsContainer .shop-item:hover {
+      background: #444;
+    }
   </style>
 </head>
 <body>
   <canvas id="game"></canvas>
+
+  <!-- Held Power Display -->
+  <div id="heldPowerDisplay" style="position:absolute; top:10px; left: 50%; transform: translateX(-50%); width:50px; height:50px; background:rgba(0,0,0,0.5); color:white; font-size:2em; display:none; align-items:center; justify-content:center; border:2px solid #fff; border-radius:4px; cursor:pointer; z-index:10;">
+    <!-- Emoji will be placed here by JavaScript -->
+  </div>
+
+  <!-- Item Shop Overlay -->
+  <div id="itemShopOverlay" style="position:absolute; top:0; left:0; right:0; bottom:0; background:rgba(0,0,0,0.85); color:white; display:none; flex-direction:column; align-items:center; justify-content:center; font-family:sans-serif; z-index:150;">
+    <h2>Item Shop</h2>
+    <div id="shopItemsContainer" style="display:flex; flex-wrap:wrap; justify-content:center; max-width: 80%;">
+      <!-- Items will be added here by JavaScript -->
+    </div>
+    <p style="margin-top: 20px;">Click 'Shop' button again to close</p>
+    <p>Kill Coins: <span id="shopKillCoinsDisplay">0</span></p>
+  </div>
 
   <!-- Start / End Overlays -->
   <div id="startOverlay">
@@ -72,6 +101,10 @@
   <div id="ui">
     <div>You: <progress id="myHealth" max="5" value="5"></progress></div>
     <!-- Opponent health bars will be added here dynamically -->
+    <div>
+      <button id="toggleShopButton" style="font-size: 0.8em; padding: 3px 6px; margin-top: 5px;">Shop</button>
+      <button id="detonateStickyButton" style="font-size: 0.8em; padding: 3px 6px; margin-top: 5px; display: none; margin-left: 5px;">Detonate</button>
+    </div>
   </div>
 
   <!-- Inventory -->
@@ -91,7 +124,7 @@
   // — Virtual World Constants —
   const WORLD_WIDTH  = 2400;
   const WORLD_HEIGHT = 2400;
-  const CAMERA_ZOOM_OUT_FACTOR = 0.75; // Less than 1 zooms out, shows more.
+  const CAMERA_ZOOM_OUT_FACTOR = 1.1; // Was 0.75, larger value means more zoomed IN
 
   // — Canvas & Matter Setup —
   const canvas = document.getElementById('game');
@@ -246,6 +279,93 @@
     }
   }
 
+  function initiateStickyBombDetonation(bomb, isAuthoritative) {
+    if (!bomb || bomb._isExploding) return; // Already handled or no bomb
+
+    bomb._isExploding = true; // Mark that this bomb is now exploding
+    console.log(`${isAuthoritative ? "Authoritative" : "Non-authoritative"} detonation for sticky bomb: ${bomb._id}`);
+
+    const explosionId = bomb._id + "_explosion_" + Date.now();
+    const explosionEffect = {
+      id: explosionId,
+      x: bomb.position.x,
+      y: bomb.position.y,
+      radius: 0,
+      maxRadius: GRENADE_EXPLOSION_RADIUS, // Using grenade constants for now
+      speed: GRENADE_EXPLOSION_RADIUS / (EXPLOSION_DURATION / (1000 / 60)),
+      color: EXPLOSION_COLOR,
+      startTime: Date.now(),
+      duration: EXPLOSION_DURATION,
+      ownerId: bomb._ownerId
+    };
+    activeExplosions.push(explosionEffect);
+
+    playBeep(100, 0.3);
+    playBeep(50, 0.2, 0.1);
+    navigator.vibrate?.([100, 50, 100]);
+
+    if (isAuthoritative) {
+      const explosionCenter = { x: explosionEffect.x, y: explosionEffect.y };
+
+      // Damage & Force Opponents
+      Object.entries(opponents).forEach(([opponentId, opData]) => {
+        if (opData.body && opData.state === 'alive') {
+          const dist = Math.hypot(opData.body.position.x - explosionCenter.x, opData.body.position.y - explosionCenter.y);
+          if (dist < GRENADE_EXPLOSION_RADIUS) { // Using grenade radius
+            send({
+              damageEvent: {
+                victimId: opponentId,
+                instigatorId: bomb._ownerId,
+                damageAmount: GRENADE_EXPLOSION_DAMAGE, // Using grenade damage
+                type: 'sticky_bomb_explosion' 
+              }
+            });
+            const angle = Math.atan2(opData.body.position.y - explosionCenter.y, opData.body.position.x - explosionCenter.x);
+            const force = { x: Math.cos(angle) * GRENADE_EXPLOSION_FORCE_PLAYER, y: Math.sin(angle) * GRENADE_EXPLOSION_FORCE_PLAYER };
+            Body.applyForce(opData.body, explosionCenter, force);
+          }
+        }
+      });
+
+      // Damage & Force Self (Local Player)
+      if (player && localPlayerState === 'alive') {
+        const distToSelf = Math.hypot(player.position.x - explosionCenter.x, player.position.y - explosionCenter.y);
+        if (distToSelf < GRENADE_EXPLOSION_RADIUS) {
+          damagePlayer(bomb._ownerId, GRENADE_EXPLOSION_DAMAGE);
+          const angle = Math.atan2(player.position.y - explosionCenter.y, player.position.x - explosionCenter.x);
+          const force = { x: Math.cos(angle) * GRENADE_EXPLOSION_FORCE_PLAYER, y: Math.sin(angle) * GRENADE_EXPLOSION_FORCE_PLAYER };
+          Body.applyForce(player, explosionCenter, force);
+        }
+      }
+
+      // Force on Interactive Blocks
+      blocks.forEach(block => {
+        if (block._isInteractive && block.body) {
+          const dist = Math.hypot(block.position.x - explosionCenter.x, block.position.y - explosionCenter.y);
+          if (dist < GRENADE_EXPLOSION_RADIUS) {
+            const angle = Math.atan2(block.position.y - explosionCenter.y, block.position.x - explosionCenter.x);
+            const force = { x: Math.cos(angle) * GRENADE_EXPLOSION_FORCE_BLOCK, y: Math.sin(angle) * GRENADE_EXPLOSION_FORCE_BLOCK };
+            Body.applyForce(block, explosionCenter, force);
+          }
+        }
+      });
+
+      send({ stickyBombExploded: { bombId: bomb._id, explosion: explosionEffect } });
+    }
+
+    // Remove the sticky bomb body from the world and active list
+    World.remove(world, bomb);
+    const index = activeStickyBombs.findIndex(b => b._id === bomb._id);
+    if (index > -1) {
+      activeStickyBombs.splice(index, 1);
+    }
+    
+    // Update button visibility if this was a locally owned bomb
+    if (bomb._ownerId === (peer ? peer.id : 'local')) {
+        updateDetonateButtonVisibility();
+    }
+  }
+
   function shoot(isLocal){
     const angle = Math.atan2(lastRight.y, lastRight.x);
     // const bid   = bulletCounter++; // Original
@@ -313,6 +433,236 @@
     }
   });
 
+  // — Invisibility Activation —
+  function activateInvisibility() {
+    if (isInvisible || !player || localPlayerState !== 'alive') return; // Already invisible, player dead, or no player
+
+    isInvisible = true;
+    const invisibilityDuration = 5000; // 5 seconds
+    invisibilityEndTime = Date.now() + invisibilityDuration;
+
+    // Optional: Play a sound effect
+    playBeep(800, 0.1); // Higher pitch beep for invisibility
+    playBeep(1200, 0.1, 0.05); // Second beep shortly after
+
+    if (peer) {
+      send({ 
+        playerPowerUpdate: { 
+          targetId: peer.id, 
+          power: 'invisibility', 
+          active: true, 
+          duration: invisibilityDuration 
+        } 
+      });
+    }
+    console.log("Invisibility activated. Ends at:", new Date(invisibilityEndTime).toLocaleTimeString());
+  }
+
+  function throwGrenade() {
+    if (!player || localPlayerState !== 'alive') return;
+    if (lastRight.x === 0 && lastRight.y === 0) {
+        console.log("Cannot throw grenade without aiming direction.");
+        // Optionally, provide feedback to the player here (e.g., a sound or UI message)
+        // For now, just prevent throw and let the power be consumed in the click handler.
+        // Or, better, the click handler should check this BEFORE consuming the power.
+        // For this iteration, we assume the click handler ensures currentHeldPower is consumed.
+        return; 
+    }
+
+    const angle = Math.atan2(lastRight.y, lastRight.x); // Use last aim direction
+    const grenadeId = (peer ? peer.id : 'local') + "_grenade_" + Date.now();
+    
+    // Position slightly in front of player
+    const startX = player.position.x + Math.cos(angle) * (size / 2 + GRENADE_SIZE);
+    const startY = player.position.y + Math.sin(angle) * (size / 2 + GRENADE_SIZE);
+
+    const grenadeBody = Bodies.circle(startX, startY, GRENADE_SIZE, {
+      density: GRENADE_DENSITY, // Using density
+      restitution: 0.6, // Bouncy
+      friction: 0.1,
+      frictionAir: 0.01,
+      render: { fillStyle: GRENADE_COLOR } 
+    });
+    grenadeBody._id = grenadeId;
+    grenadeBody._ownerId = peer ? peer.id : 'local';
+    grenadeBody._throwTime = Date.now(); 
+    grenadeBody._type = 'grenade'; 
+
+    Body.setVelocity(grenadeBody, { 
+      x: player.velocity.x + Math.cos(angle) * GRENADE_THROW_FORCE, 
+      y: player.velocity.y + Math.sin(angle) * GRENADE_THROW_FORCE 
+    });
+
+    World.add(world, grenadeBody);
+    activeGrenades.push(grenadeBody);
+
+    // Network the grenade throw
+    if (peer) {
+      send({ 
+        newGrenade: {
+          id: grenadeId,
+          ownerId: grenadeBody._ownerId,
+          x: startX,
+          y: startY,
+          size: GRENADE_SIZE, // GRENADE_SIZE is a const, so it's fine
+          density: GRENADE_DENSITY, // Send density if it can vary or for completeness
+          velocity: grenadeBody.velocity,
+          throwTime: grenadeBody._throwTime,
+          angle: grenadeBody.angle, 
+          color: GRENADE_COLOR // Send color if it can vary
+        }
+      });
+    }
+    playBeep(400, 0.1); // Throw sound
+  }
+
+  function triggerExplosion(sourceGrenade, isAuthoritative) {
+    if (!sourceGrenade) return;
+
+    console.log(`${isAuthoritative ? "Authoritative" : "Non-authoritative"} explosion for grenade: ${sourceGrenade._id}`);
+    const explosionId = sourceGrenade._id + "_explosion_" + Date.now(); // Ensure unique explosion ID
+    
+    const explosionEffect = { 
+      id: explosionId, 
+      x: sourceGrenade.position.x, 
+      y: sourceGrenade.position.y, 
+      radius: 0, 
+      maxRadius: GRENADE_EXPLOSION_RADIUS, 
+      // Calculate speed to reach maxRadius in EXPLOSION_DURATION
+      speed: GRENADE_EXPLOSION_RADIUS / (EXPLOSION_DURATION / (1000/60)), // Assuming 60fps
+      color: EXPLOSION_COLOR, 
+      startTime: Date.now(), 
+      duration: EXPLOSION_DURATION, 
+      ownerId: sourceGrenade._ownerId 
+    };
+    activeExplosions.push(explosionEffect);
+
+    playBeep(100, 0.3); 
+    playBeep(50, 0.2, 0.1); // Staggered low beep for rumble
+    navigator.vibrate?.([100, 50, 100]);
+
+    if (isAuthoritative) {
+      // --- Damage and Force Application (Authoritative) ---
+      const explosionCenter = { x: explosionEffect.x, y: explosionEffect.y };
+
+      // Damage & Force Opponents
+      Object.entries(opponents).forEach(([opponentId, opData]) => {
+        if (opData.body && opData.state === 'alive') {
+          const dist = Math.hypot(opData.body.position.x - explosionCenter.x, opData.body.position.y - explosionCenter.y);
+          if (dist < GRENADE_EXPLOSION_RADIUS) {
+            send({ 
+              damageEvent: { 
+                victimId: opponentId, 
+                instigatorId: sourceGrenade._ownerId, 
+                damageAmount: GRENADE_EXPLOSION_DAMAGE, 
+                type: 'grenade_explosion' 
+              } 
+            });
+            const angle = Math.atan2(opData.body.position.y - explosionCenter.y, opData.body.position.x - explosionCenter.x);
+            const force = { x: Math.cos(angle) * GRENADE_EXPLOSION_FORCE_PLAYER, y: Math.sin(angle) * GRENADE_EXPLOSION_FORCE_PLAYER };
+            Body.applyForce(opData.body, explosionCenter, force); 
+          }
+        }
+      });
+
+      // Damage & Force Self (Local Player)
+      if (player && localPlayerState === 'alive') {
+        const distToSelf = Math.hypot(player.position.x - explosionCenter.x, player.position.y - explosionCenter.y);
+        if (distToSelf < GRENADE_EXPLOSION_RADIUS) {
+          damagePlayer(sourceGrenade._ownerId, GRENADE_EXPLOSION_DAMAGE); // Assuming damagePlayer can take amount
+          const angle = Math.atan2(player.position.y - explosionCenter.y, player.position.x - explosionCenter.x);
+          const force = { x: Math.cos(angle) * GRENADE_EXPLOSION_FORCE_PLAYER, y: Math.sin(angle) * GRENADE_EXPLOSION_FORCE_PLAYER };
+          Body.applyForce(player, explosionCenter, force);
+        }
+      }
+
+      // Force on Interactive Blocks
+      blocks.forEach(block => {
+        if (block._isInteractive && block.body) { // Assuming block itself is the body
+          const dist = Math.hypot(block.position.x - explosionCenter.x, block.position.y - explosionCenter.y);
+          if (dist < GRENADE_EXPLOSION_RADIUS) {
+            const angle = Math.atan2(block.position.y - explosionCenter.y, block.position.x - explosionCenter.x);
+            const force = { x: Math.cos(angle) * GRENADE_EXPLOSION_FORCE_BLOCK, y: Math.sin(angle) * GRENADE_EXPLOSION_FORCE_BLOCK };
+            Body.applyForce(block, explosionCenter, force);
+          }
+        }
+      });
+
+      send({ grenadeExploded: { grenadeId: sourceGrenade._id, explosion: explosionEffect } });
+    }
+
+    // Remove the grenade body from the world and active list
+    World.remove(world, sourceGrenade);
+    const index = activeGrenades.findIndex(g => g._id === sourceGrenade._id);
+    if (index > -1) {
+      activeGrenades.splice(index, 1);
+    }
+  }
+
+  function throwStickyBomb() {
+    if (!player || localPlayerState !== 'alive') return;
+
+    // Aiming check is done in the click handler before calling this
+    const angle = Math.atan2(lastRight.y, lastRight.x);
+    const bombId = (peer ? peer.id : 'local') + "_sticky_" + Date.now();
+    
+    const startX = player.position.x + Math.cos(angle) * (size / 2 + STICKY_BOMB_SIZE);
+    const startY = player.position.y + Math.sin(angle) * (size / 2 + STICKY_BOMB_SIZE);
+
+    const bombBody = Bodies.circle(startX, startY, STICKY_BOMB_SIZE, {
+      density: STICKY_BOMB_DENSITY,
+      restitution: 0.2, 
+      friction: 0.7, 
+      frictionAir: 0.02,
+      render: { fillStyle: STICKY_BOMB_COLOR }
+    });
+    bombBody._id = bombId;
+    bombBody._ownerId = peer ? peer.id : 'local';
+    bombBody._type = 'sticky_bomb';
+    bombBody._isStuck = false;
+    bombBody._stuckTo = null; 
+    bombBody._stuckOffset = null; 
+
+    Body.setVelocity(bombBody, { 
+      x: player.velocity.x + Math.cos(angle) * STICKY_BOMB_THROW_FORCE, 
+      y: player.velocity.y + Math.sin(angle) * STICKY_BOMB_THROW_FORCE 
+    });
+
+    World.add(world, bombBody);
+    activeStickyBombs.push(bombBody);
+
+    if (peer) {
+      send({ 
+        newStickyBomb: {
+          id: bombId,
+          ownerId: bombBody._ownerId,
+          x: startX,
+          y: startY,
+          size: STICKY_BOMB_SIZE,
+          density: STICKY_BOMB_DENSITY,
+          velocity: bombBody.velocity,
+          angle: bombBody.angle,
+          color: STICKY_BOMB_COLOR,
+          isStuck: bombBody._isStuck, 
+          stuckTo: bombBody._stuckTo,
+          stuckOffset: bombBody._stuckOffset
+        }
+      });
+    }
+    playBeep(450, 0.1); 
+    updateDetonateButtonVisibility(); // Update button visibility after throwing
+  }
+
+  // Debug trigger for Invisibility
+  window.addEventListener('keydown', (e) => {
+    if ((e.key === 'i' || e.key === 'I') && localPlayerState === 'alive') {
+      if (document.activeElement && (document.activeElement.tagName === 'INPUT' || document.activeElement.tagName === 'TEXTAREA')) {
+        return; // Don't trigger if typing
+      }
+      activateInvisibility();
+    }
+  });
+
   // — Audio Unlock & Beeps —
   const audioCtx = new (window.AudioContext||window.webkitAudioContext)();
   let audioUnlocked=false;
@@ -341,7 +691,33 @@
       senderId: peer.id,
       pos: [player.position.x, player.position.y], // Matter.js position
       angle: player.angle, // Matter.js body angle
-      // blocks: blocks.map(b=>({ id:b._id, x:b.position.x, y:b.position.y, angle:b.angle })), // Original block sync example
+      blocks: blocks.filter(b => b._isInteractive).map(b => ({ 
+        id: b._id, 
+        x: b.position.x, 
+        y: b.position.y, 
+        angle: b.angle,
+        velocity: b.velocity,           // Send linear velocity
+        angularVelocity: b.angularVelocity // Send angular velocity
+      })),
+      grenades: activeGrenades.map(g => ({ 
+        id: g._id, 
+        x: g.position.x, 
+        y: g.position.y, 
+        angle: g.angle, 
+        velocity: g.velocity, 
+        angularVelocity: g.angularVelocity 
+      })),
+      stickyBombs: activeStickyBombs.map(b => ({ 
+        id: b._id, 
+        x: b.position.x, 
+        y: b.position.y, 
+        angle: b.angle, 
+        velocity: b.velocity, 
+        angularVelocity: b.angularVelocity,
+        isStuck: b._isStuck,      // Sync stick status
+        stuckTo: b._stuckTo,      // Sync ID of object stuck to
+        stuckOffset: b._stuckOffset // Sync offset if stuck
+      })),
       // health: myHealth // Health is often sent specifically on change
     }, customData);
 
@@ -384,6 +760,33 @@
       }
     }
 
+    if (data.playerPowerUpdate && data.playerPowerUpdate.power === 'invisibility') {
+      const targetId = data.playerPowerUpdate.targetId;
+      const isActive = data.playerPowerUpdate.active;
+
+      if (targetId === (peer ? peer.id : 'local')) {
+        // This message is for the local player. While the local player manages their own
+        // invisibility duration, this could act as an authoritative update or echo.
+        // For now, we primarily rely on local state, but log it.
+        console.log("Received invisibility update for local player:", isActive);
+        // Potentially sync:
+        // isInvisible = isActive;
+        // if (isActive && data.playerPowerUpdate.duration) {
+        //    invisibilityEndTime = Date.now() + data.playerPowerUpdate.duration;
+        // } else if (!isActive) {
+        //    invisibilityEndTime = 0;
+        // }
+      } else if (opponents[targetId]) {
+        opponents[targetId].isInvisible = isActive;
+        // Optional: Store end time for remote players if needed for other UI effects,
+        // but for rendering, the boolean is the primary driver.
+        // if (isActive && data.playerPowerUpdate.duration) {
+        //     opponents[targetId].invisibilityEndTime = Date.now() + data.playerPowerUpdate.duration;
+        // }
+        console.log(`Opponent ${targetId} invisibility set to: ${isActive}`);
+      }
+    }
+
     if (data.damageEvent) { // Received a damage event
       const victimId = data.damageEvent.victimId;
       const instigatorId = data.damageEvent.instigatorId;
@@ -407,6 +810,11 @@
                 Body.setStatic(opponentBody, false); // Corrected for Matter.js
                 opponentBody.isSensor = false; // Restore as non-sensor
                 // Position will be set by pos sync or a specific respawn message part
+                if (data.playerState.isInvisible !== undefined) {
+                    targetOpponent.isInvisible = data.playerState.isInvisible;
+                } else {
+                    targetOpponent.isInvisible = false; // Default to visible if not specified
+                }
             }
         }
         console.log(`Opponent ${data.playerState.targetId} state changed to: ${data.playerState.state}`);
@@ -456,15 +864,270 @@
     if(data.shoot && data.bullet) spawnRemoteBullet(data.bullet, data.bullet.shooterId || data.senderId); // Ensure shooterId is passed
 
     // Block updates (less likely to change per player, but structure is here)
-    if(data.blocks){ // Block positions are also Vec3 in Cannon.js, assuming Z is blockSize/2
-      data.blocks.forEach(bd=>{
-        const b=blocks.find(x=>x._id===bd.id);
-        if(b){ 
-          b.position.set(bd.x,bd.y, blockSize/2); 
-          // For angle, Cannon.js uses quaternions. If bd.angle is Euler Z:
-          b.quaternion.setFromEuler(0, 0, bd.angle || 0); 
+    if (data.blocks && senderId !== (peer ? peer.id : 'local')) { // Only process if data is from another peer
+        data.blocks.forEach(bd => {
+            const blockToUpdate = blocks.find(b => b._id === bd.id);
+            // Assuming 'blocks' array stores Matter.js Body objects directly.
+            // and these bodies have an '_isInteractive' property.
+            if (blockToUpdate && blockToUpdate._isInteractive) { 
+                Body.setPosition(blockToUpdate, { x: bd.x, y: bd.y });
+                Body.setAngle(blockToUpdate, bd.angle);
+                
+                if (bd.velocity) {
+                    Body.setVelocity(blockToUpdate, bd.velocity);
+                }
+                if (bd.angularVelocity !== undefined) { // angularVelocity can be 0, so check for undefined
+                    Body.setAngularVelocity(blockToUpdate, bd.angularVelocity);
+                }
+            }
+        });
+    }
+
+    if (data.newStickyBomb && data.senderId !== (peer ? peer.id : 'local')) {
+      if (!activeStickyBombs.some(b => b._id === data.newStickyBomb.id)) {
+        const bombData = data.newStickyBomb;
+        const bombBody = Bodies.circle(bombData.x, bombData.y, bombData.size, {
+          density: bombData.density || STICKY_BOMB_DENSITY,
+          restitution: 0.2,
+          friction: 0.7,
+          frictionAir: 0.02,
+          render: { fillStyle: bombData.color || STICKY_BOMB_COLOR }
+        });
+        bombBody._id = bombData.id;
+        bombBody._ownerId = bombData.ownerId;
+        bombBody._type = 'sticky_bomb';
+        bombBody._isStuck = bombData.isStuck || false; // Ensure these are initialized
+        bombBody._stuckTo = bombData.stuckTo || null;
+        bombBody._stuckOffset = bombData.stuckOffset || null;
+
+        Body.setPosition(bombBody, { x: bombData.x, y: bombData.y });
+        Body.setVelocity(bombBody, bombData.velocity);
+        Body.setAngle(bombBody, bombData.angle || 0);
+
+        World.add(world, bombBody);
+        activeStickyBombs.push(bombBody);
+        console.log("Remote sticky bomb added:", bombData.id);
+      }
+    }
+
+    if (data.stickyBombs && senderId !== (peer ? peer.id : 'local')) {
+        data.stickyBombs.forEach(sbd => {
+            let bombToUpdate = activeStickyBombs.find(b => b._id === sbd.id);
+            if (bombToUpdate) {
+                bombToUpdate._isStuck = sbd.isStuck;
+                bombToUpdate._stuckTo = sbd.stuckTo;
+                bombToUpdate._stuckOffset = sbd.stuckOffset;
+
+                if (bombToUpdate._isStuck) {
+                    if (!bombToUpdate.isStatic) { // Ensure it's static if stuck
+                        Body.setStatic(bombToUpdate, true);
+                    }
+                    // Position for stuck bombs is handled by the main update() loop
+                    // based on _stuckTo and _stuckOffset. We trust the local calculation
+                    // for visual smoothness once the stuck state is known.
+                    // If sbd contains an authoritative position from the owner even when stuck, use it:
+                    // Body.setPosition(bombToUpdate, { x: sbd.x, y: sbd.y });
+                    // Body.setAngle(bombToUpdate, sbd.angle); // And potentially angle
+                } else {
+                    if (bombToUpdate.isStatic) { // Ensure it's dynamic if not stuck
+                        Body.setStatic(bombToUpdate, false);
+                    }
+                    // If not stuck, update all physics properties from sync
+                    Body.setPosition(bombToUpdate, { x: sbd.x, y: sbd.y });
+                    Body.setAngle(bombToUpdate, sbd.angle);
+                    Body.setVelocity(bombToUpdate, sbd.velocity);
+                    if (sbd.angularVelocity !== undefined) {
+                       Body.setAngularVelocity(bombToUpdate, sbd.angularVelocity);
+                    }
+                }
+            } else {
+                // Sticky bomb doesn't exist locally, create it (e.g. if newStickyBomb message was missed)
+                const newBombBody = Bodies.circle(sbd.x, sbd.y, sbd.size || STICKY_BOMB_SIZE, {
+                    density: sbd.density || STICKY_BOMB_DENSITY,
+                    restitution: 0.2,
+                    friction: 0.7,
+                    frictionAir: 0.02,
+                    render: { fillStyle: sbd.color || STICKY_BOMB_COLOR }
+                });
+                newBombBody._id = sbd.id;
+                newBombBody._ownerId = sbd.ownerId || senderId; // Guess owner if not provided
+                newBombBody._type = 'sticky_bomb';
+                newBombBody._isStuck = sbd.isStuck;
+                newBombBody._stuckTo = sbd.stuckTo;
+                newBombBody._stuckOffset = sbd.stuckOffset;
+
+                Body.setPosition(newBombBody, {x: sbd.x, y: sbd.y});
+                Body.setVelocity(newBombBody, sbd.velocity || {x:0, y:0}); // Default velocity if not provided
+                Body.setAngle(newBombBody, sbd.angle || 0);
+                 if (sbd.angularVelocity !== undefined) {
+                    Body.setAngularVelocity(newBombBody, sbd.angularVelocity);
+                }
+                World.add(world, newBombBody);
+                activeStickyBombs.push(newBombBody);
+                console.log("Sticky bomb added from sync data:", sbd.id);
+            }
+        });
+    }
+
+    if (data.stickyBombStuck && data.senderId !== (peer ? peer.id : 'local')) {
+        const bomb = activeStickyBombs.find(b => b._id === data.stickyBombStuck.bombId);
+        if (bomb && !bomb._isStuck) { 
+            bomb._isStuck = true;
+            bomb._stuckTo = data.stickyBombStuck.stuckTo;
+            bomb._stuckOffset = data.stickyBombStuck.offset;
+            Body.setStatic(bomb, true); 
+            
+            // Optional: Immediately set position based on received data for quicker sync
+            // This is helpful if the target entity's position is also synced reliably.
+            if (data.stickyBombStuck.position) {
+                 Body.setPosition(bomb, data.stickyBombStuck.position);
+            }
+            console.log(`Remote sticky bomb ${bomb._id} is now stuck.`);
         }
-      });
+    }
+
+    if (data.stickyBombUnstuck && data.senderId !== (peer ? peer.id : 'local')) {
+        const bomb = activeStickyBombs.find(b => b._id === data.stickyBombUnstuck.bombId);
+        if (bomb && bomb._isStuck) {
+            bomb._isStuck = false;
+            bomb._stuckTo = null;
+            bomb._stuckOffset = null;
+            Body.setStatic(bomb, false); 
+            console.log(`Remote sticky bomb ${bomb._id} is now unstuck.`);
+        }
+    }
+
+    if (data.stickyBombExploded) {
+        const { bombId, explosion } = data.stickyBombExploded; // Ensure 'explosion' is the key used in sender
+        const bomb = activeStickyBombs.find(b => b._id === bombId);
+
+        if (bomb) {
+            // Check if this client is not the owner, as owner already handled it.
+            if (bomb._ownerId !== (peer ? peer.id : 'local')) {
+                console.log(`Remote detonation for sticky bomb: ${bombId}`);
+                initiateStickyBombDetonation(bomb, false); // Non-authoritative
+            } else {
+                 // Owner receiving its own explosion event. Bomb should already be removed by its own initiateStickyBombDetonation.
+                 // This path primarily ensures button visibility is correct if somehow it wasn't updated.
+                 updateDetonateButtonVisibility();
+                 console.log("Owner received own stickyBombExploded event for:", bombId);
+            }
+        } else if (explosion && explosion.ownerId !== (peer ? peer.id : 'local')) {
+            // Bomb not found locally, but explosion data exists (e.g. late join, or bomb removed too early by some other means)
+            // Create visual effect only for the remote explosion.
+            const remoteExplosion = { ...explosion }; // Clone to be safe
+            remoteExplosion.startTime = Date.now(); // Start animation based on when we received it
+            remoteExplosion.radius = 0; 
+            // Calculate speed to reach maxRadius in EXPLOSION_DURATION
+            remoteExplosion.speed = remoteExplosion.maxRadius / (remoteExplosion.duration / (1000 / 60)); // Assuming 60fps
+            activeExplosions.push(remoteExplosion);
+            
+            playBeep(100, 0.3); 
+            playBeep(50, 0.2, 0.1); // Explosion sound for remote
+            console.log("Remote sticky bomb explosion effect created for bomb not found locally:", bombId);
+            
+            // Attempt to remove from world just in case it's there but not in activeStickyBombs
+            const worldBomb = World.bodies.find(b => b._id === bombId);
+            if(worldBomb) World.remove(world, worldBomb);
+        }
+    }
+
+    if (data.grenadeExploded) { // Note: owner also receives this, but isAuthoritative handles it.
+                               // Or, add: && data.senderId !== (peer ? peer.id : 'local') if owner should not re-process.
+                               // For now, let's assume owner might get it but won't re-apply damage.
+      const { grenadeId, explosion } = data.grenadeExploded;
+      const originalGrenade = activeGrenades.find(g => g._id === grenadeId);
+
+      if (originalGrenade && originalGrenade._ownerId !== (peer ? peer.id : 'local')) {
+        // Trigger non-authoritative explosion for visual and local physics feedback
+        triggerExplosion(originalGrenade, false); 
+      } else if (!originalGrenade && explosion && explosion.ownerId !== (peer ? peer.id : 'local')) {
+        // Grenade was already removed (e.g. by fuse locally), but we need to show remote explosion
+        const remoteExplosion = { ...explosion }; // Clone
+        remoteExplosion.startTime = Date.now(); // Start animation based on when we received it
+        remoteExplosion.radius = 0; 
+        // Calculate speed to reach maxRadius in EXPLOSION_DURATION
+        remoteExplosion.speed = remoteExplosion.maxRadius / (remoteExplosion.duration / (1000/60));
+        activeExplosions.push(remoteExplosion);
+        
+        playBeep(100, 0.3); 
+        playBeep(50, 0.2, 0.1); 
+        
+        // Ensure the body is removed from world if it somehow still exists
+        const gBody = World.bodies.find(b => b._id === grenadeId);
+        if(gBody) World.remove(world, gBody);
+        // And from activeGrenades array
+        activeGrenades = activeGrenades.filter(gr => gr._id !== grenadeId);
+        console.log("Remote explosion effect created for already removed grenade:", grenadeId);
+      } else if (originalGrenade && originalGrenade._ownerId === (peer ? peer.id : 'local')) {
+        // This is the owner receiving their own grenadeExploded message.
+        // The grenade should have been removed by triggerExplosion already.
+        // We can log or do nothing.
+        console.log("Owner received own grenadeExploded event for:", grenadeId);
+      }
+    }
+
+    if (data.newGrenade && data.senderId !== (peer ? peer.id : 'local')) {
+      if (!activeGrenades.some(g => g._id === data.newGrenade.id)) { // Check if we already have this grenade
+        const grenadeData = data.newGrenade;
+        const grenadeBody = Bodies.circle(grenadeData.x, grenadeData.y, grenadeData.size, {
+          density: grenadeData.density || GRENADE_DENSITY, // Use sent density or default
+          restitution: 0.6,
+          friction: 0.1,
+          frictionAir: 0.01,
+          render: { fillStyle: grenadeData.color || GRENADE_COLOR } // Use sent color or default
+        });
+        grenadeBody._id = grenadeData.id;
+        grenadeBody._ownerId = grenadeData.ownerId;
+        grenadeBody._throwTime = grenadeData.throwTime;
+        grenadeBody._type = 'grenade';
+
+        Body.setPosition(grenadeBody, { x: grenadeData.x, y: grenadeData.y });
+        Body.setVelocity(grenadeBody, grenadeData.velocity);
+        Body.setAngle(grenadeBody, grenadeData.angle || 0);
+
+        World.add(world, grenadeBody);
+        activeGrenades.push(grenadeBody);
+        console.log("Remote grenade added:", grenadeData.id);
+      }
+    }
+
+    if (data.grenades && senderId !== (peer ? peer.id : 'local')) {
+        data.grenades.forEach(gd => {
+            const grenadeToUpdate = activeGrenades.find(g => g._id === gd.id);
+            if (grenadeToUpdate) {
+                Body.setPosition(grenadeToUpdate, { x: gd.x, y: gd.y });
+                Body.setAngle(grenadeToUpdate, gd.angle);
+                Body.setVelocity(grenadeToUpdate, gd.velocity);
+                if (gd.angularVelocity !== undefined) {
+                    Body.setAngularVelocity(grenadeToUpdate, gd.angularVelocity);
+                }
+            } else {
+                // Grenade doesn't exist locally, might be a latecomer, create it.
+                // This logic is similar to newGrenade but uses the sync data.
+                const newGrenadeBody = Bodies.circle(gd.x, gd.y, GRENADE_SIZE, { // Assuming GRENADE_SIZE is known
+                    density: GRENADE_DENSITY, // Assuming default if not sent
+                    restitution: 0.6,
+                    friction: 0.1,
+                    frictionAir: 0.01,
+                    render: { fillStyle: GRENADE_COLOR } // Assuming default if not sent
+                });
+                newGrenadeBody._id = gd.id;
+                newGrenadeBody._ownerId = gd.ownerId || senderId; // Guess owner if not provided in sync
+                newGrenadeBody._throwTime = Date.now(); // Cannot know original throwTime from sync
+                newGrenadeBody._type = 'grenade';
+
+                Body.setPosition(newGrenadeBody, {x: gd.x, y: gd.y});
+                Body.setVelocity(newGrenadeBody, gd.velocity);
+                Body.setAngle(newGrenadeBody, gd.angle || 0);
+                if (gd.angularVelocity !== undefined) {
+                    Body.setAngularVelocity(newGrenadeBody, gd.angularVelocity);
+                }
+                World.add(world, newGrenadeBody);
+                activeGrenades.push(newGrenadeBody);
+                console.log("Grenade added from sync data:", gd.id);
+            }
+        });
     }
   }
 
@@ -530,7 +1193,8 @@
       // angle: 0, // Replaced by aimAngle on body itself
       spawnPoint: opponentSpawnPoint, // Store the spawn point
       isDefeated: false, // To track if kill has been counted for this opponent
-      state: 'alive' // Initial state for opponent
+      state: 'alive', // Initial state for opponent
+      isInvisible: false // Initial invisibility state for opponent
     };
 
     // Add health bar for new opponent
@@ -621,16 +1285,56 @@
   // — Health & Kills —
   let myHealth = 5;
   let myKills = 0;
+  let myKillCoins = 0;
 
-  function damagePlayer(instigatorId = null){ // instigatorId is the peerId of the shooter
+  // Invisibility Power Variables
+  let isInvisible = false;
+  let invisibilityEndTime = 0;
+  // Player's Held Power
+  let currentHeldPower = null;
+  // Grenade Variables & Constants
+  let activeGrenades = [];
+  const GRENADE_SIZE = 10;
+  const GRENADE_DENSITY = 0.001; 
+  const GRENADE_THROW_FORCE = 10; 
+  const GRENADE_FUSE_TIME = 3000; // milliseconds (3 seconds)
+  const GRENADE_EXPLOSION_RADIUS = 150;
+  const GRENADE_EXPLOSION_DAMAGE = 2; // Amount of damage
+  const GRENADE_EXPLOSION_FORCE_PLAYER = 0.1; // Specific force for players
+  const GRENADE_EXPLOSION_FORCE_BLOCK = 0.08; // Specific force for blocks
+  const GRENADE_COLOR = '#22dd22'; // Greenish
+  
+  let activeExplosions = []; // For visual explosion effects
+  const EXPLOSION_COLOR = 'rgba(255, 100, 0, 0.7)';
+  const EXPLOSION_DURATION = 500; // ms, for visual effect
+
+  // Sticky Bomb Variables & Constants
+  let activeStickyBombs = [];
+  const STICKY_BOMB_SIZE = 8;
+  const STICKY_BOMB_DENSITY = 0.4; 
+  const STICKY_BOMB_THROW_FORCE = 12;
+  const STICKY_BOMB_COLOR = '#00cc00'; // Green
+
+  // Shockwave Power Variables
+  let activeShockwaves = [];
+  const SHOCKWAVE_MAX_RADIUS = 300;
+  const SHOCKWAVE_SPEED = 10; // Pixels per update cycle
+  const SHOCKWAVE_COLOR_SELF = 'rgba(0, 150, 255, 0.5)';  // Blueish for self
+  const SHOCKWAVE_COLOR_OTHER = 'rgba(255, 100, 0, 0.5)'; // Orangish for others
+
+  function damagePlayer(instigatorId = null, damageAmount = 1){ // instigatorId is the peerId of the shooter, default damage 1
     if (myHealth <= 0) return; // Already defeated
 
-    myHealth--;
+    myHealth -= damageAmount;
     document.getElementById('myHealth').value = myHealth;
     cam.shake = 20; navigator.vibrate?.(100);
 
     if(myHealth <= 0) {
       localPlayerState = 'dead';
+      currentHeldPower = null; // Reset held power on death
+      document.getElementById('heldPowerDisplay').style.display = 'none'; // Hide display
+      document.getElementById('heldPowerDisplay').textContent = '';      // Clear content
+      console.log("Player died, currentHeldPower reset, display hidden.");
       showEnd('You Died');
       // The instigator (if any) will see the healthUpdate and increment their kill count.
       
@@ -664,35 +1368,82 @@
 
   Events.on(engine,'collisionStart',ev=>{ // Restoring Matter.js collision logic
     ev.pairs.forEach(p=>{
-      const [A,B] = [p.bodyA, p.bodyB];
-      // Local player hit by a bullet.
-      // Assumes bullet has shooterId property
-      if (player && !player.isSensor) { // Check if player is not a sensor
-        if(bullets.includes(A) && B === player){ removeBullet(A._id); damagePlayer(A.shooterId || null); } 
-        if(bullets.includes(B) && A === player){ removeBullet(B._id); damagePlayer(B.shooterId || null); } 
+      const [bodyA, bodyB] = [p.bodyA, p.bodyB];
+
+      // Bullet collision logic (existing)
+      if (player && !player.isSensor) { 
+        if(bullets.includes(bodyA) && bodyB === player){ removeBullet(bodyA._id); damagePlayer(bodyA.shooterId || null); } 
+        if(bullets.includes(bodyB) && bodyA === player){ removeBullet(bodyB._id); damagePlayer(bodyB.shooterId || null); } 
       }
-
-      // Opponent hit by a bullet (sent by local player)
       Object.values(opponents).forEach(op => {
-        if (op && op.body && !op.body.isSensor) { // Check if opponent body exists and is not a sensor
+        if (op && op.body && !op.body.isSensor) { 
           let bulletHit = null;
-          // let hitOpponentBody = null; // Not strictly needed if only op.body is used for checks
-          if (bullets.includes(A) && B === op.body) bulletHit = A; 
-          if (bullets.includes(B) && A === op.body) bulletHit = B;
-
+          if (bullets.includes(bodyA) && bodyB === op.body) bulletHit = bodyA; 
+          if (bullets.includes(bodyB) && bodyA === op.body) bulletHit = bodyB;
           if (bulletHit) {
             removeBullet(bulletHit._id);
-            // Send a damage event if this client's bullet hit an opponent
             if (bulletHit.shooterId === (peer ? peer.id : "local")) { 
                send({ damageEvent: { victimId: op.conn.peer, instigatorId: (peer ? peer.id : "local"), damageAmount: 1, bulletId: bulletHit._id } });
             }
           }
         }
       });
+
+      // Sticky Bomb Sticking Logic
+      let bombBody, targetBody, targetType, targetIdValue;
+
+      if (bodyA._type === 'sticky_bomb' && !bodyA._isStuck) {
+        bombBody = bodyA;
+        targetBody = bodyB;
+      } else if (bodyB._type === 'sticky_bomb' && !bodyB._isStuck) {
+        bombBody = bodyB;
+        targetBody = bodyA;
+      }
+
+      if (bombBody) {
+        // Determine target type
+        if (targetBody === player) {
+          targetType = 'player';
+          targetIdValue = peer ? peer.id : 'local';
+        } else {
+          const opponentEntry = Object.entries(opponents).find(([id, opData]) => opData.body === targetBody);
+          if (opponentEntry) {
+            targetType = 'opponent';
+            targetIdValue = opponentEntry[0]; // This is the opponent's peerId
+          } else {
+            const blockEntry = blocks.find(b => b === targetBody);
+            if (blockEntry) {
+              targetType = blockEntry._isInteractive ? 'interactive_block' : 'static_block';
+              targetIdValue = blockEntry._id;
+            }
+          }
+        }
+
+        if (targetType) { // If it's a valid target to stick to
+          bombBody._isStuck = true;
+          Body.setStatic(bombBody, true); // Make bomb static so it moves with the target
+          bombBody._stuckTo = { type: targetType, id: targetIdValue };
+          bombBody._stuckOffset = { 
+            x: bombBody.position.x - targetBody.position.x, 
+            y: bombBody.position.y - targetBody.position.y 
+          };
+          
+          console.log(`Sticky bomb ${bombBody._id} stuck to ${targetType} ${targetIdValue}`);
+          playBeep(300, 0.05); // Stick sound
+
+          if (bombBody._ownerId === (peer ? peer.id : 'local')) {
+            send({ 
+              stickyBombStuck: { 
+                bombId: bombBody._id, 
+                stuckTo: bombBody._stuckTo, 
+                offset: bombBody._stuckOffset,
+                position: bombBody.position // Send current position for immediate remote update
+              } 
+            });
+          }
+        }
+      }
     });
-    // This line was present in an older version of collision handler. If myKills is purely client-side based on direct hits, it might be okay.
-    // However, kills are now determined by receiving a healthUpdate where newHealth <=0 and this client was the instigator.
-    // document.getElementById('myKills').textContent = myKills; 
   });
 
   // // In spawnRemoteBullet, tag bullet with shooterId // OLD MATTER.JS FUNCTION - REMOVED
@@ -762,8 +1513,11 @@
   }
 
   document.getElementById('rematch').onclick=()=>{
-    myHealth = 5; myKills = 0; // Reset local player
+    myHealth = 5; myKills = 0; currentHeldPower = null; // Reset local player stats including held power
     localPlayerState = 'alive';
+    document.getElementById('heldPowerDisplay').style.display = 'none'; // Hide display
+    document.getElementById('heldPowerDisplay').textContent = '';      // Clear content
+    console.log("Rematch, currentHeldPower reset, display hidden.");
     if(player) {
         Body.setStatic(player, false); // Matter.js
         player.isSensor = false; // Restore as non-sensor
@@ -817,6 +1571,11 @@
       myHealth = 5; // Reset health (use max health constant if available)
       document.getElementById('myHealth').value = myHealth;
 
+      // Reset invisibility state
+      isInvisible = false;
+      invisibilityEndTime = 0;
+      // currentHeldPower is intentionally NOT reset here as per requirements
+
       // Restore player body physics
       if (player) { // Ensure player body exists
         Body.setStatic(player, false); // Matter.js
@@ -840,7 +1599,11 @@
       // Send respawn state to others
       if (peer && player) { // Ensure peer and player exist for sending data
         send({ 
-            playerState: { targetId: peer.id, state: 'alive' },
+            playerState: { 
+                targetId: peer.id, 
+                state: 'alive',
+                isInvisible: false // Explicitly state player is visible on respawn
+            },
             pos: [player.position.x, player.position.y], // Send current position
             healthUpdate: { targetId: peer.id, newHealth: myHealth } // Send current health
         });
@@ -851,15 +1614,156 @@
   };
 
   function update(){
-    Body.setVelocity(player,{ x:leftStick.x*6, y:leftStick.y*6 }); // Reverted
+    if (player && localPlayerState === 'alive') { // Only apply velocity if player exists and is alive
+        Body.setVelocity(player,{ x:leftStick.x*6, y:leftStick.y*6 }); 
+    }
     
     // player.aimAngle update removed, assuming player.angle (physics body angle) will be used or aiming is visual only.
     // If aiming needs to rotate the physics body, Body.setAngle(player, newAngle) would be used here.
     // For now, sticking to original Matter.js behavior where player.angle is physics driven.
 
-    cam.x=player.position.x; cam.y=player.position.y;
-    Engine.update(engine,1000/60); // Reverted
-    send({});
+    // Update active shockwaves
+    for (let i = activeShockwaves.length - 1; i >= 0; i--) {
+      const sw = activeShockwaves[i];
+      sw.radius += sw.speed;
+
+      // --- Shockwave Collision/Effect Logic (only for locally owned shockwaves) ---
+      if (sw.ownerId === (peer ? peer.id : 'local')) {
+        // Opponent Interaction
+        Object.entries(opponents).forEach(([opponentId, opData]) => {
+          if (opData.body && opData.state === 'alive' && !sw.affectedEntities.has(opponentId)) {
+            const dist = Math.hypot(opData.body.position.x - sw.x, opData.body.position.y - sw.y);
+            if (dist < sw.radius && dist > (sw.radius - sw.speed * 2) ) { // Check within current expansion band
+              // Send damage event
+              send({ 
+                damageEvent: { 
+                  victimId: opponentId, 
+                  instigatorId: peer.id, 
+                  damageAmount: 1, // Or a specific shockwave damage amount
+                  type: 'shockwave' 
+                } 
+              });
+
+              // Apply force locally for visual feedback
+              const angle = Math.atan2(opData.body.position.y - sw.y, opData.body.position.x - sw.x);
+              const forceMagnitude = 0.05; // Adjust as needed, consider opponent mass
+              const force = { x: Math.cos(angle) * forceMagnitude, y: Math.sin(angle) * forceMagnitude };
+              Body.applyForce(opData.body, { x: sw.x, y: sw.y }, force); // Apply force at shockwave center relative to opponent
+
+              sw.affectedEntities.add(opponentId);
+            }
+          }
+        });
+
+        // Interactive Block Interaction
+        blocks.forEach(block => {
+          if (block._isInteractive && block.body && !sw.affectedEntities.has(block._id)) { // Ensure block.body exists
+            const dist = Math.hypot(block.position.x - sw.x, block.position.y - sw.y);
+             // Check within current expansion band, and also ensure block is not too close to center (already passed)
+            if (dist < sw.radius && dist > (sw.radius - sw.speed * 2) ) { 
+              const blockForceMagnitude = 0.03; // Adjust as needed, consider block mass
+              const angle = Math.atan2(block.position.y - sw.y, block.position.x - sw.x);
+              const force = { x: Math.cos(angle) * blockForceMagnitude, y: Math.sin(angle) * blockForceMagnitude };
+              Body.applyForce(block, { x: sw.x, y: sw.y }, force);
+
+              sw.affectedEntities.add(block._id);
+            }
+          }
+        });
+      }
+      // --- End Shockwave Collision/Effect Logic ---
+
+      if (sw.radius >= sw.maxRadius) {
+        activeShockwaves.splice(i, 1); // Remove shockwave if it reached max radius
+      }
+    }
+
+    // Update Invisibility State
+    if (isInvisible && Date.now() >= invisibilityEndTime) {
+      isInvisible = false;
+      if (peer) {
+        send({ 
+          playerPowerUpdate: { 
+            targetId: peer.id, 
+            power: 'invisibility', 
+            active: false 
+          } 
+        });
+      }
+      console.log("Invisibility ended at:", new Date().toLocaleTimeString());
+    }
+
+    // Update active sticky bombs (maintain position if stuck)
+    activeStickyBombs.forEach(bomb => {
+      if (bomb._isStuck && bomb._stuckTo) {
+        let targetEntityBody = null;
+        if (bomb._stuckTo.type === 'player' && bomb._stuckTo.id === (peer ? peer.id : 'local')) {
+          targetEntityBody = player;
+        } else if (bomb._stuckTo.type === 'opponent') {
+          const op = opponents[bomb._stuckTo.id];
+          if (op && op.body) targetEntityBody = op.body;
+        } else if (bomb._stuckTo.type === 'interactive_block' || bomb._stuckTo.type === 'static_block') {
+          targetEntityBody = blocks.find(b => b._id === bomb._stuckTo.id);
+        }
+
+        if (targetEntityBody) {
+          const newPos = { 
+            x: targetEntityBody.position.x + bomb._stuckOffset.x, 
+            y: targetEntityBody.position.y + bomb._stuckOffset.y 
+          };
+          Body.setPosition(bomb, newPos);
+          // Body.setAngle(bomb, targetEntityBody.angle); // Match angle if desired, might cause visual spinning if parent spins
+        } else {
+          // Target entity disappeared or not found, unstick the bomb
+          bomb._isStuck = false;
+          bomb._stuckTo = null;
+          bomb._stuckOffset = null;
+          Body.setStatic(bomb, false); // Make it dynamic again
+          console.log(`Sticky bomb ${bomb._id} unstuck because target disappeared.`);
+          if (bomb._ownerId === (peer ? peer.id : 'local')) {
+            send({ stickyBombUnstuck: { bombId: bomb._id } });
+          }
+        }
+      }
+    });
+
+    // Update active grenades (fuse timer)
+    for (let i = activeGrenades.length - 1; i >= 0; i--) {
+        const g = activeGrenades[i];
+        if (g._isExploding) continue; // Already marked for explosion, skip further checks
+
+        if (Date.now() > g._throwTime + GRENADE_FUSE_TIME) {
+            if (g._ownerId === (peer ? peer.id : 'local')) { // Only owner triggers the authoritative explosion
+                if (!g._isExploding) { // Prevent multiple triggers if somehow re-evaluated
+                    g._isExploding = true; // Mark as processing explosion
+                    triggerExplosion(g, true); // true for authoritative
+                }
+            }
+            // Non-owners will have their grenades removed when they receive the 'grenadeExploded' event.
+            // However, if an owner's grenade message is lost, other clients might keep the grenade too long.
+            // A fallback timeout for non-owned grenades could be added here if necessary,
+            // e.g., remove if significantly past fuse time and no explosion event received.
+        }
+    }
+    // Filter out grenades that have been marked as exploded and processed by triggerExplosion (for owner)
+    // or by network event (for non-owners, handled in handleData for grenadeExploded).
+    // This specific filtering might be better handled directly where grenades are removed (triggerExplosion/handleData).
+
+    // Update visual explosions
+    for (let i = activeExplosions.length - 1; i >= 0; i--) {
+        const exp = activeExplosions[i];
+        exp.radius += exp.speed;
+        if (Date.now() > exp.startTime + exp.duration) {
+            activeExplosions.splice(i, 1);
+        }
+    }
+
+    if (player) { // Ensure player exists before trying to access its properties for camera
+       cam.x=player.position.x; 
+       cam.y=player.position.y;
+    }
+    Engine.update(engine,1000/60); 
+    if (peer && peer.open) send({}); // Send updates only if peer connection is open
     render();
     requestAnimationFrame(update);
   }
@@ -867,6 +1771,15 @@
   // const euler = new CANNON.Vec3(); // Removed as it's for Cannon.js quaternions
   function render(){
     applyCamera();
+
+    // Render visual explosions
+    activeExplosions.forEach(exp => {
+      ctx.beginPath();
+      ctx.arc(exp.x, exp.y, exp.radius, 0, 2 * Math.PI);
+      ctx.fillStyle = exp.color;
+      ctx.fill();
+    });
+
     // draw blocks
     blocks.forEach(b=>{
       ctx.save();
@@ -888,7 +1801,7 @@
     });
     // draw players
     // Draw local player
-    if (localPlayerState === 'alive') {
+    if (localPlayerState === 'alive' && !isInvisible) { // Don't draw if invisible
         ctx.save();
         ctx.translate(player.position.x, player.position.y);
         ctx.rotate(player.angle); // Reverted to Matter.js player.angle
@@ -899,8 +1812,8 @@
 
     // Draw opponents
     Object.values(opponents).forEach(op => {
-      // Check if opponent, its body, and its state exist, and if state is not 'dead'
-      if (op && op.body && op.state !== 'dead') { 
+      // Check if opponent, its body, and its state exist, and if state is not 'dead' AND not invisible
+      if (op && op.body && op.state !== 'dead' && !op.isInvisible) { 
         ctx.save();
         ctx.translate(op.body.position.x, op.body.position.y);
         ctx.rotate(op.body.angle); // Reverted to Matter.js op.body.angle
@@ -921,9 +1834,178 @@
     ctx.strokeRect(0,0,WORLD_WIDTH, WORLD_HEIGHT);
   }
 
+  // — Item Shop Logic —
+  const shopItems = [
+    { id: 'shockwave', name: 'Shockwave', cost: 1, emoji: '💥', description: 'Unleash a force blast.' },
+    { id: 'invisibility', name: 'Invisibility (5s)', cost: 1, emoji: '👻', description: 'Become unseen for 5 seconds.' },
+    { id: 'grenade', name: 'Grenade', cost: 2, emoji: '💣', description: 'Explodes after a short fuse.' },
+    { id: 'sticky_bomb', name: 'Sticky Bomb', cost: 3, emoji: '🟢', description: 'Sticks to surfaces! Detonate remotely.' }
+    // Add more items here as they are implemented
+  ];
+
+  const shopItemsContainer = document.getElementById('shopItemsContainer');
+  const itemShopOverlay = document.getElementById('itemShopOverlay');
+  const shopKillCoinsDisplay = document.getElementById('shopKillCoinsDisplay');
+
+  function populateShopItems() {
+    if (!shopItemsContainer) return;
+    shopItemsContainer.innerHTML = ''; // Clear existing items
+
+    shopItems.forEach(item => {
+      const itemElement = document.createElement('div');
+      itemElement.classList.add('shop-item');
+      itemElement.innerHTML = `${item.emoji} ${item.name} <br>Cost: ${item.cost} <span title="${item.description}">ℹ️</span>`;
+      itemElement.onclick = () => {
+        purchaseItem(item.id, item.cost);
+      };
+      shopItemsContainer.appendChild(itemElement);
+    });
+  }
+
+  function purchaseItem(itemId, itemCost) {
+    if (currentHeldPower !== null) {
+      alert("You already have a power equipped! Use it or lose it before buying another.");
+      return;
+    }
+
+    if (myKillCoins >= itemCost) {
+      myKillCoins -= itemCost;
+      currentHeldPower = itemId;
+
+      // Update kill coin displays
+      document.getElementById('myKillCoinsDisplay').textContent = myKillCoins;
+      if (itemShopOverlay.style.display === 'flex') { // Check if shop is open before updating its display
+          shopKillCoinsDisplay.textContent = myKillCoins;
+      }
+
+      console.log(`Purchased ${itemId}. Current power: ${currentHeldPower}. Coins left: ${myKillCoins}`);
+      playBeep(700, 0.1); // Purchase success sound
+      playBeep(1000, 0.1, 0.05);
+
+      // Update held power display
+      const itemDetails = shopItems.find(shopItem => shopItem.id === itemId);
+      const heldPowerDisplay = document.getElementById('heldPowerDisplay');
+      if (itemDetails && itemDetails.emoji && heldPowerDisplay) {
+        heldPowerDisplay.textContent = itemDetails.emoji;
+        heldPowerDisplay.style.display = 'flex';
+      }
+
+      // Close the shop automatically
+      itemShopOverlay.style.display = 'none';
+    } else {
+      alert("Not enough Kill Coins!");
+      playBeep(150, 0.2); // Not enough coins sound
+    }
+  }
+
+  function updateDetonateButtonVisibility() {
+    const detonateButton = document.getElementById('detonateStickyButton');
+    if (!detonateButton) return;
+
+    const localStickyBombsExist = activeStickyBombs.some(b => b._ownerId === (peer ? peer.id : 'local') && !b._isExploding); // Also check if not already exploding
+    detonateButton.style.display = localStickyBombsExist ? 'inline-block' : 'none';
+  }
+
+  // Initial population of shop items
+  populateShopItems();
+
+  // Shop Toggle Button Listener
+  const toggleShopBtn = document.getElementById('toggleShopButton');
+  if (toggleShopBtn) {
+    toggleShopBtn.onclick = () => {
+      const shopOverlay = document.getElementById('itemShopOverlay');
+      if (shopOverlay.style.display === 'flex') {
+        shopOverlay.style.display = 'none';
+      } else {
+        // Update kill coins display in shop before showing
+        document.getElementById('shopKillCoinsDisplay').textContent = myKillCoins;
+        shopOverlay.style.display = 'flex';
+      }
+    };
+  }
+
+  // Detonate Sticky Bomb Button Listener
+  const detonateButton = document.getElementById('detonateStickyButton');
+  if (detonateButton) {
+    detonateButton.onclick = () => {
+      if (localPlayerState !== 'alive') return;
+
+      // Find the oldest active sticky bomb owned by the local player
+      let oldestBomb = null;
+      for (let i = 0; i < activeStickyBombs.length; i++) {
+        const bomb = activeStickyBombs[i];
+        if (bomb._ownerId === (peer ? peer.id : 'local') && !bomb._isExploding) {
+          if (!oldestBomb || bomb._throwTime < oldestBomb._throwTime) {
+            oldestBomb = bomb;
+          }
+        }
+      }
+
+      if (oldestBomb) {
+        console.log(`Player manually detonating sticky bomb: ${oldestBomb._id}`);
+        initiateStickyBombDetonation(oldestBomb, true); // Authoritative detonation
+        // updateDetonateButtonVisibility(); // Called inside initiateStickyBombDetonation
+      } else {
+        console.log("No local sticky bombs to detonate.");
+        updateDetonateButtonVisibility(); // Should hide the button if no bombs are actually available
+      }
+    };
+  }
+
+  // Click listener for Held Power Display
+  const heldPowerDisplayElement = document.getElementById('heldPowerDisplay');
+  if (heldPowerDisplayElement) {
+    heldPowerDisplayElement.onclick = () => {
+      if (currentHeldPower && localPlayerState === 'alive') {
+        console.log(`Activating power: ${currentHeldPower}`);
+        let powerActivated = false;
+        if (currentHeldPower === 'shockwave') {
+          activateShockwave();
+          powerActivated = true;
+        } else if (currentHeldPower === 'invisibility') {
+          activateInvisibility();
+          powerActivated = true;
+        } else if (currentHeldPower === 'grenade') {
+          if (lastRight.x === 0 && lastRight.y === 0) {
+            alert("Please aim with the right joystick before throwing a grenade.");
+            return; 
+          }
+          throwGrenade();
+          powerActivated = true;
+        } else if (currentHeldPower === 'sticky_bomb') {
+          if (lastRight.x === 0 && lastRight.y === 0) {
+            alert("Please aim with the right joystick before deploying a sticky bomb!");
+            return;
+          }
+          throwStickyBomb();
+          powerActivated = true;
+        }
+        // Add more power activations here with else if (currentHeldPower === 'someOtherPower')
+
+        if (powerActivated) {
+          currentHeldPower = null;
+          heldPowerDisplayElement.style.display = 'none';
+          heldPowerDisplayElement.textContent = '';
+          playBeep(900, 0.15); // Power activation sound
+        }
+      } else if (!currentHeldPower) {
+        console.log("No power held to activate.");
+      } else if (localPlayerState !== 'alive') {
+        console.log("Cannot activate power while not alive.");
+      }
+    };
+  }
+
   update();
-  // prevent page scroll on touch
-  document.body.addEventListener('touchmove',e=>e.preventDefault(),{ passive:false });
+  // document.body.addEventListener('touchmove',e=>e.preventDefault(),{ passive:false }); // Original page scroll prevention
   </script>
 </body>
 </html>
+
+[end of index.html]
+
+[end of index.html]
+
+[end of index.html]
+
+[end of index.html]
