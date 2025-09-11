@@ -441,6 +441,12 @@
         <input id="mpHostId" placeholder="host-id-to-join" style="flex:1; padding:8px;" />
         <button id="mpJoin">Connect</button>
       </div>
+      <hr style="border:none;border-top:1px solid #333; margin:14px 0;"/>
+      <div style="display:flex; gap:12px; align-items:center; flex-wrap:wrap;">
+        <button id="mpEnableMic">Enable Mic</button>
+        <button id="mpToggleMute" disabled>Mute</button>
+        <span id="mpVoiceStatus" style="color:#9f9;">Mic: Off</span>
+      </div>
       <div id="mpStatus" style="margin-top:16px; color:#9ad; font-size:14px;">Status: Idle</div>
       <div id="mpPeers" style="margin-top:10px; color:#ccc; font-size:14px;">Peers: none</div>
       <div style="text-align:right; margin-top:16px;"><button id="mpClose">Close</button></div>
@@ -585,6 +591,9 @@
       conns: new Map(), // id -> DataConnection
       ghosts: new Map(), // id -> {mesh}
       lastBroadcast: 0,
+      localStream: null,
+      muted: false,
+      audioEls: new Map(), // id -> HTMLAudioElement
     };
 
     function mpLog(msg){ try{ document.getElementById('mpStatus').textContent = 'Status: ' + msg; }catch(_){} }
@@ -646,6 +655,8 @@
       conn.on('data', (d)=> handleMessage(conn.peer, d));
       conn.on('close', ()=>{ MP.conns.delete(conn.peer); mpListPeers(); });
       conn.on('error', ()=>{ MP.conns.delete(conn.peer); mpListPeers(); });
+      // Try starting a media call to this peer if we have a mic
+      if (MP.localStream){ try{ mpCallPeer(conn.peer); }catch(_){ } }
     }
 
     function startHosting(id){
@@ -653,6 +664,15 @@
       MP.isHost = true; MP.myId = id; MP.peer = new Peer(id);
       MP.peer.on('open', ()=> mpLog('Hosting as ' + id));
       MP.peer.on('connection', (conn)=>{ mpLog('Peer connected: ' + conn.peer); wireConn(conn); });
+      MP.peer.on('call', (call)=>{ // incoming media call
+        try{
+          if (MP.localStream){ call.answer(MP.localStream); }
+          else { call.answer(); }
+          call.on('stream', (remoteStream)=> attachRemoteAudio(call.peer, remoteStream));
+          call.on('close', ()=> detachRemoteAudio(call.peer));
+          call.on('error', ()=> detachRemoteAudio(call.peer));
+        }catch(_){ }
+      });
       MP.peer.on('error', (e)=> mpLog('Error: ' + (e?.type||e?.message||e)));
     }
 
@@ -670,7 +690,81 @@
       MP.peer.on('connection', (conn)=>{ // if others connect to a client, accept and relay
         wireConn(conn); mpLog('Peer connected: ' + conn.peer);
       });
+      MP.peer.on('call', (call)=>{ // incoming media call
+        try{
+          if (MP.localStream){ call.answer(MP.localStream); }
+          else { call.answer(); }
+          call.on('stream', (remoteStream)=> attachRemoteAudio(call.peer, remoteStream));
+          call.on('close', ()=> detachRemoteAudio(call.peer));
+          call.on('error', ()=> detachRemoteAudio(call.peer));
+        }catch(_){ }
+      });
       MP.peer.on('error', (e)=> mpLog('Error: ' + (e?.type||e?.message||e)));
+    }
+
+    // --- Voice Chat helpers ---
+    async function enableMic(){
+      if (MP.localStream) return MP.localStream;
+      try{
+        const stream = await navigator.mediaDevices.getUserMedia({
+          audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true },
+          video: false
+        });
+        MP.localStream = stream;
+        document.getElementById('mpVoiceStatus').textContent = 'Mic: On';
+        document.getElementById('mpToggleMute').disabled = false;
+        // call all connected peers
+        for (const id of MP.conns.keys()){ try{ mpCallPeer(id); }catch(_){ } }
+        return stream;
+      }catch(err){
+        mpLog('Mic permission denied');
+        console.warn('Mic error', err);
+        return null;
+      }
+    }
+
+    function mpCallPeer(id){
+      if (!MP.peer || !MP.localStream) return;
+      try{
+        const call = MP.peer.call(id, MP.localStream);
+        call.on('stream', (remoteStream)=> attachRemoteAudio(id, remoteStream));
+        call.on('close', ()=> detachRemoteAudio(id));
+        call.on('error', ()=> detachRemoteAudio(id));
+      }catch(_){ }
+    }
+
+    function attachRemoteAudio(id, remoteStream){
+      try{
+        let el = MP.audioEls.get(id);
+        if (!el){
+          el = document.createElement('audio');
+          el.autoplay = true; el.playsInline = true; el.style.display='none';
+          document.body.appendChild(el);
+          MP.audioEls.set(id, el);
+        }
+        el.srcObject = remoteStream;
+        const p = el.play(); if (p && p.catch) p.catch(()=>{});
+      }catch(_){ }
+    }
+
+    function detachRemoteAudio(id){
+      try{
+        const el = MP.audioEls.get(id);
+        if (el){ el.srcObject = null; el.remove(); MP.audioEls.delete(id); }
+      }catch(_){ }
+    }
+
+    function setMuted(m){
+      MP.muted = !!m;
+      try{
+        if (MP.localStream){
+          MP.localStream.getAudioTracks().forEach(t=> t.enabled = !MP.muted);
+        }
+        const btn = document.getElementById('mpToggleMute');
+        const label = document.getElementById('mpVoiceStatus');
+        if (btn) btn.textContent = MP.muted ? 'Unmute' : 'Mute';
+        if (label) label.textContent = 'Mic: ' + (MP.muted ? 'Muted' : 'On');
+      }catch(_){ }
     }
 
     // UI wiring
@@ -679,6 +773,8 @@
       const closeBtn = document.getElementById('mpClose');
       const hostBtn = document.getElementById('mpStartHost');
       const joinBtn = document.getElementById('mpJoin');
+      const micBtn = document.getElementById('mpEnableMic');
+      const muteBtn = document.getElementById('mpToggleMute');
       const o = document.getElementById('mpOverlay');
       openBtn?.addEventListener('click', ()=>{ o.style.display='block'; });
       closeBtn?.addEventListener('click', ()=>{ o.style.display='none'; });
@@ -692,6 +788,8 @@
         if (!hostId) { mpLog('Enter a host ID'); return; }
         joinHost(myId, hostId);
       });
+      micBtn?.addEventListener('click', async ()=>{ await enableMic(); setMuted(false); });
+      muteBtn?.addEventListener('click', ()=> setMuted(!MP.muted));
     })();
 
     // Broadcast state at ~10 Hz
@@ -702,6 +800,25 @@
         broadcast({ t:'state', px:p.x, py:p.y, pz:p.z, vx:v.x, vy:v.y, vz:v.z, qx:q.x, qy:q.y, qz:q.z, qw:q.w, ts: performance.now() });
       }catch(_){ }
     }, 100);
+
+    // ================= Water Block (preview) =================
+    // Minimal visual + physics placeholder for future low-res fluid sim
+    function spawnWaterBlock(x, y, z, size=1){
+      try{
+        const geo = new THREE.BoxGeometry(size, size, size);
+        const mat = new THREE.MeshPhysicalMaterial({ color: 0x3aa7ff, transparent:true, opacity:0.55, roughness:0.2, metalness:0.0, transmission:0.6, thickness:0.4 });
+        const mesh = new THREE.Mesh(geo, mat); mesh.position.set(x*BLOCK_SIZE, y*BLOCK_SIZE, z*BLOCK_SIZE);
+        mesh.castShadow=false; mesh.receiveShadow=true;
+        scene.add(mesh);
+        const shape = new CANNON.Box(new CANNON.Vec3((size*BLOCK_SIZE)/2, (size*BLOCK_SIZE)/2, (size*BLOCK_SIZE)/2));
+        const body = new CANNON.Body({ mass: 0, material: groundMaterial });
+        body.addShape(shape); body.position.set(mesh.position.x, mesh.position.y, mesh.position.z);
+        world.addBody(body);
+        objects.push({ mesh, body, type:'water' });
+        return { mesh, body };
+      }catch(e){ console.warn('spawnWaterBlock failed', e); }
+      return null;
+    }
 
       // subtle ambient motes around player
       try{
