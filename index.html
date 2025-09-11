@@ -433,6 +433,9 @@
   <div id="crosshair"></div>
   <div id="blockInfo"></div>
   <button id="saveButton" onclick="saveGame()">Save Game</button>
+  <!-- Cinematic Overlays -->
+  <div id="vignette" style="position:fixed;inset:0;pointer-events:none;z-index:5;background:radial-gradient(circle at center, rgba(0,0,0,0) 50%, rgba(0,0,0,0.35) 85%, rgba(0,0,0,0.6) 100%);"></div>
+  <div id="fxFlash" style="position:fixed;inset:0;pointer-events:none;z-index:6;background:#fff;opacity:0;transition:opacity 0.18s ease;"></div>
   <!-- Stock Market Overlay -->
   <div id="stockMarketOverlay">
     <div class="overlay-content">
@@ -549,6 +552,26 @@
         fpsCounter.style.display = isVisible ? 'none' : 'block';
         localStorage.setItem('fpsCounterVisible', !isVisible);
       });
+
+      // subtle ambient motes around player
+      try{
+        animate.__ambientT = (animate.__ambientT||0) + delta;
+        if (VFX.enabled && animate.__ambientT > 1.4){
+          animate.__ambientT = 0;
+          const base = new THREE.Vector3(playerBody.position.x, playerBody.position.y + 1.2, playerBody.position.z);
+          emitBurst({ origin: base, count: 6, spread: 0.6, upBias: 0.4, speed: 0.6, gravity: 1.5, life: 1.6, color: 0x99ccff, size: 0.035, blend: 'normal' });
+        }
+      }catch(_){ }
+      // head bobbing while moving
+      try{
+        const v = playerBody.velocity; const horiz = Math.sqrt(v.x*v.x+v.z*v.z);
+        animate.__bobT = (animate.__bobT||0) + (horiz>0.4 ? delta * (8 + Math.min(6, horiz*0.8)) : 0);
+        const targetBob = (horiz>0.4 ? Math.sin(animate.__bobT) * 0.03 : 0);
+        const obj = controls.getObject();
+        animate.__lastBob = animate.__lastBob || 0;
+        const dBob = targetBob - animate.__lastBob;
+        if (dBob) { obj.position.y += dBob; animate.__lastBob = targetBob; }
+      }catch(_){ }
       
       performanceSlider.addEventListener('input', (e) => {
         const value = e.target.value;
@@ -832,6 +855,20 @@
     playerShadow.position.y = 0.01; // Will be updated dynamically
     scene.add(playerShadow);
 
+    // ---- Camera Shake + Screen Flash Utilities ----
+    let shakeT = 0, shakeAmp = 0;
+    function triggerShake(strength=0.4, duration=300){
+      shakeAmp = Math.max(shakeAmp, strength);
+      shakeT = Math.max(shakeT, duration/1000);
+    }
+    function screenFlash(color='#ffffff', durationMs=160, maxOpacity=0.6){
+      const el = document.getElementById('fxFlash');
+      if (!el) return;
+      el.style.background = color;
+      el.style.opacity = String(maxOpacity);
+      setTimeout(()=>{ el.style.opacity = '0'; }, Math.max(30, durationMs));
+    }
+
     // ---- Adaptive Resolution to hit target FPS ----
     setInterval(()=>{
       if (!Number.isFinite(fps) || !fps) return;
@@ -1026,6 +1063,36 @@
       emitBurst({ origin: vec3, count: 60 + strength*60, spread: 0.8, upBias: 0.2, speed: 5.5 + strength*2.0, gravity: 9.82, life: 0.9, color: 0xffaa55, size: 0.06, blend: 'add' });
     }
 
+    // Shockwave ring helper (expands outward in XZ)
+    function emitShockwaveRing(center){
+      const count = 160;
+      const ps = acquireSystem();
+      const pos = ps.geometry.getAttribute('position');
+      const vel = ps.geometry.getAttribute('velocity');
+      const lif = ps.geometry.getAttribute('life');
+      const n = Math.min(count, pos.count);
+      for (let i=0;i<n;i++){
+        const a = (i/n) * Math.PI*2;
+        const dirx = Math.cos(a), dirz = Math.sin(a);
+        const j=i*3;
+        pos.array[j] = center.x + dirx*0.2;
+        pos.array[j+1] = center.y + 0.1;
+        pos.array[j+2] = center.z + dirz*0.2;
+        vel.array[j] = dirx * 6.5;
+        vel.array[j+1] = 1.0;
+        vel.array[j+2] = dirz * 6.5;
+        lif.array[i] = 0.8;
+      }
+      for (let i=n;i<pos.count;i++){ lif.array[i]=0; }
+      pos.needsUpdate = vel.needsUpdate = lif.needsUpdate = true;
+      ps.material.color.setHex(0x99ccff);
+      ps.material.size = 0.05;
+      ps.material.blending = THREE.AdditiveBlending;
+      ps.userData = { gravity: 2.0 };
+      ps.position.set(0,0,0);
+      scene.add(ps); VFX.systems.push(ps);
+    }
+
     // --- Create Grass Ground ---
     // --- Create a realistic grass texture ---
     const grassTexture = new THREE.TextureLoader().load(
@@ -1087,6 +1154,10 @@
 
     // --- Jump flag (set via collision event) ---
     let canJumpFlag = false;
+    // --- Smash move (Shift) state ---
+    let smashArmed = false;
+    let lastSmashTime = 0;
+    const smashCooldownMs = 900;
     playerBody.addEventListener("collide", function(e) {
       const contact = e.contact;
       // Determine which way the contact normal is facing
@@ -1108,7 +1179,42 @@
             emitDustAt(p, Math.min(3, speed*0.3));
             if (speed>6) emitSparksAt(p, Math.min(3, (speed-6)*0.2));
           }
+          // impact shake
+          triggerShake(Math.min(0.7, 0.15 + speed*0.04), 240);
         }catch(_){ }
+        // If smash is armed, trigger the smash explosion on ground
+        if (smashArmed){
+          smashArmed = false; lastSmashTime = performance.now();
+          const center = new CANNON.Vec3(playerBody.position.x, playerBody.position.y-0.2, playerBody.position.z);
+          const radius = 6.0; const strength = 360;
+          for (const o of objects){
+            if (!o.body || o.body.mass === 0) continue;
+            const to = o.body.position.vsub(center);
+            const dist = to.length();
+            if (dist>0 && dist < radius){
+              const n = to.scale(1/dist);
+              const impulseMag = strength * (1 - dist/radius);
+              const impulse = new CANNON.Vec3(n.x*impulseMag, (0.35+Math.random()*0.3)*impulseMag, n.z*impulseMag);
+              try{ o.body.applyImpulse(impulse, o.body.position); }catch(e){ try{ o.body.applyForce(impulse, o.body.position);}catch(_){}}
+            }
+          }
+          // VFX and camera
+          try{
+            const c3 = new THREE.Vector3(center.x, center.y, center.z);
+            emitDustAt(c3, 3);
+            emitSparksAt(c3, 2.2);
+            emitShockwaveRing(c3);
+            triggerShake(0.9, 420);
+            screenFlash('#ffffff', 160, 0.45);
+          }catch(_){ }
+          // rebound boost
+          playerBody.velocity.y = Math.max(playerBody.velocity.y, 14);
+          // quick fov kick
+          try{
+            const prev = camera.fov; camera.fov = Math.max(60, prev-6); camera.updateProjectionMatrix();
+            setTimeout(()=>{ camera.fov = prev; camera.updateProjectionMatrix(); }, 280);
+          }catch(_){ }
+        }
       }
     });
 
@@ -1862,6 +1968,19 @@
             setTimeout(() => {
               stickyBlocksTemporarilyDisabled = false;
             }, 500); // Re-enable after 0.5 seconds
+        }
+      }
+      // Smash move on Shift (zoom down, explode on ground)
+      if (e.code === 'ShiftLeft' || e.code === 'ShiftRight' || e.key === 'Shift'){
+        const now = performance.now();
+        if (now - lastSmashTime > smashCooldownMs && !smashArmed){
+          smashArmed = true;
+          // accelerate downward and slight forward
+          const dir = camera.getWorldDirection(new THREE.Vector3());
+          playerBody.velocity.x += dir.x * 2.0;
+          playerBody.velocity.z += dir.z * 2.0;
+          playerBody.velocity.y = Math.min(playerBody.velocity.y, -14);
+          try{ triggerShake(0.45, 220); }catch(_){ }
         }
       }
       if (e.key === 'r' || e.key === 'R') {
@@ -2932,6 +3051,30 @@
               playSound('shootSound');
               showMuzzleFlash();
               setTimeout(() => playSound('shootImpactSound'), 120);
+            } else {
+              showDebugMessage("No ammo!");
+            }
+          } else {
+            // No block targeted: if aiming at ground, give a small lift
+            if (inventory.ammo > 0) {
+              try{
+                const rc = new THREE.Raycaster();
+                rc.set(camera.position, camera.getWorldDirection(new THREE.Vector3()));
+                const hits = groundMesh ? rc.intersectObject(groundMesh, true) : [];
+                if (hits && hits.length){
+                  const h = hits[0];
+                  const dir = camera.getWorldDirection(new THREE.Vector3());
+                  const downDot = new THREE.Vector3(0,-1,0).dot(dir);
+                  if (downDot > 0.35){
+                    playerBody.velocity.y = Math.max(playerBody.velocity.y, 6.5);
+                    inventory.ammo--; updateInventoryDisplay();
+                    showDebugMessage('Ground boost!');
+                    playSound('boostSound');
+                    try{ triggerShake(0.35, 180); screenFlash('#ffffff', 120, 0.35); }catch(_){ }
+                    emitDustAt(new THREE.Vector3(h.point.x, h.point.y+0.1, h.point.z), 1.2);
+                  }
+                }
+              }catch(_){ }
             } else {
               showDebugMessage("No ammo!");
             }
