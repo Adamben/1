@@ -427,6 +427,27 @@
     <button onclick="advanceLevel()">Advance to Next Level Click Enter, Or Go Back With ESC</button>
   </div>
 
+  <!-- Multiplayer Overlay -->
+  <div id="mpOverlay" style="display:none; position:fixed; inset:0; background:rgba(0,0,0,0.85); z-index:800; color:#fff; font-family:sans-serif;">
+    <div style="max-width:520px; margin:60px auto; padding:20px; background:#1b1b1b; border-radius:8px; box-shadow:0 10px 30px rgba(0,0,0,0.5);">
+      <h2>Multiplayer (Peer-to-Peer)</h2>
+      <div style="display:flex; gap:12px; align-items:center; flex-wrap:wrap;">
+        <label style="min-width:120px;">Your ID</label>
+        <input id="mpMyId" placeholder="choose-your-id" style="flex:1; padding:8px;" />
+        <button id="mpStartHost">Start Hosting</button>
+      </div>
+      <div style="display:flex; gap:12px; align-items:center; margin-top:14px; flex-wrap:wrap;">
+        <label style="min-width:120px;">Host ID</label>
+        <input id="mpHostId" placeholder="host-id-to-join" style="flex:1; padding:8px;" />
+        <button id="mpJoin">Connect</button>
+      </div>
+      <div id="mpStatus" style="margin-top:16px; color:#9ad; font-size:14px;">Status: Idle</div>
+      <div id="mpPeers" style="margin-top:10px; color:#ccc; font-size:14px;">Peers: none</div>
+      <div style="text-align:right; margin-top:16px;"><button id="mpClose">Close</button></div>
+    </div>
+  </div>
+  <button id="mpOpen" style="position:fixed; top:12px; right:12px; z-index:820;">Multiplayer</button>
+
   <!-- In-game UI elements -->
   <div id="inventory">Blocks: 0 | Spheres: 0 | Ammo: 10 | Collectables: 0</div>
   <div id="debug"></div>
@@ -503,6 +524,8 @@
   <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
   <script src="https://cdn.jsdelivr.net/npm/three@0.128/examples/js/controls/PointerLockControls.js"></script>
   <script src="https://cdn.jsdelivr.net/npm/cannon/build/cannon.min.js"></script>
+  <!-- Load PeerJS for multiplayer -->
+  <script src="https://unpkg.com/peerjs@1.5.2/dist/peerjs.min.js"></script>
   <script>
     // --- Performance and FPS Tracking ---
     let fps = 0;
@@ -552,6 +575,133 @@
         fpsCounter.style.display = isVisible ? 'none' : 'block';
         localStorage.setItem('fpsCounterVisible', !isVisible);
       });
+
+    // ================= Multiplayer (PeerJS) =================
+    const MP = {
+      peer: null,
+      isHost: false,
+      myId: null,
+      hostId: null,
+      conns: new Map(), // id -> DataConnection
+      ghosts: new Map(), // id -> {mesh}
+      lastBroadcast: 0,
+    };
+
+    function mpLog(msg){ try{ document.getElementById('mpStatus').textContent = 'Status: ' + msg; }catch(_){} }
+    function mpListPeers(){
+      try{
+        const ids = Array.from(MP.conns.keys());
+        document.getElementById('mpPeers').textContent = 'Peers: ' + (ids.length? ids.join(', '): 'none');
+      }catch(_){}
+    }
+
+    function createGhost(id){
+      if (MP.ghosts.has(id)) return MP.ghosts.get(id);
+      const geo = new THREE.SphereGeometry(0.5, 16, 12);
+      const mat = new THREE.MeshPhongMaterial({ color: new THREE.Color().setHSL(Math.random(), 0.8, 0.6), emissive: 0x112244, shininess: 20 });
+      const mesh = new THREE.Mesh(geo, mat);
+      mesh.castShadow = true; mesh.receiveShadow = true;
+      scene.add(mesh);
+      const ghost = { mesh, lastUpdate: performance.now() };
+      MP.ghosts.set(id, ghost);
+      return ghost;
+    }
+
+    function updateGhost(id, state){
+      const g = createGhost(id);
+      const m = g.mesh;
+      m.position.set(state.px, state.py, state.pz);
+      // Optional smoothing can be added; direct set for responsiveness
+      g.lastUpdate = performance.now();
+    }
+
+    function broadcast(data){
+      for (const [id, c] of MP.conns){ try{ c.open && c.send(data); }catch(_){ }}
+    }
+
+    function handleMessage(srcId, data){
+      if (!data || !data.t) return;
+      switch(data.t){
+        case 'state':
+          if (srcId) updateGhost(srcId, data);
+          if (MP.isHost){ // relay to others
+            for (const [id, c] of MP.conns){ if (id!==srcId) { try{ c.send(data); }catch(_){ } } }
+          }
+          break;
+        case 'event':
+          if (data.k==='smash'){
+            try{ triggerShake(0.6, 300); emitShockwaveRing(new THREE.Vector3(data.x, data.y, data.z)); }catch(_){ }
+          }
+          if (data.k==='boost'){
+            try{ triggerShake(0.35, 160); }catch(_){ }
+          }
+          if (MP.isHost){ for (const [id, c] of MP.conns){ if (id!==srcId) { try{ c.send(data); }catch(_){ } } }
+          }
+          break;
+      }
+    }
+
+    function wireConn(conn){
+      MP.conns.set(conn.peer, conn); mpListPeers();
+      conn.on('data', (d)=> handleMessage(conn.peer, d));
+      conn.on('close', ()=>{ MP.conns.delete(conn.peer); mpListPeers(); });
+      conn.on('error', ()=>{ MP.conns.delete(conn.peer); mpListPeers(); });
+    }
+
+    function startHosting(id){
+      if (MP.peer) { try{ MP.peer.destroy(); }catch(_){ } }
+      MP.isHost = true; MP.myId = id; MP.peer = new Peer(id);
+      MP.peer.on('open', ()=> mpLog('Hosting as ' + id));
+      MP.peer.on('connection', (conn)=>{ mpLog('Peer connected: ' + conn.peer); wireConn(conn); });
+      MP.peer.on('error', (e)=> mpLog('Error: ' + (e?.type||e?.message||e)));
+    }
+
+    function joinHost(myId, hostId){
+      if (MP.peer) { try{ MP.peer.destroy(); }catch(_){ } }
+      MP.isHost = false; MP.myId = myId; MP.hostId = hostId; MP.peer = new Peer(myId);
+      MP.peer.on('open', ()=>{
+        mpLog('Connecting to host ' + hostId);
+        const conn = MP.peer.connect(hostId, { reliable: true });
+        conn.on('open', ()=> { wireConn(conn); mpLog('Connected to host'); });
+        conn.on('data', (d)=> handleMessage(conn.peer, d));
+        conn.on('close', ()=>{ MP.conns.delete(conn.peer); mpListPeers(); mpLog('Disconnected'); });
+        conn.on('error', (e)=> mpLog('Conn error: ' + (e?.type||e?.message||e)));
+      });
+      MP.peer.on('connection', (conn)=>{ // if others connect to a client, accept and relay
+        wireConn(conn); mpLog('Peer connected: ' + conn.peer);
+      });
+      MP.peer.on('error', (e)=> mpLog('Error: ' + (e?.type||e?.message||e)));
+    }
+
+    // UI wiring
+    (function initMultiplayerUI(){
+      const openBtn = document.getElementById('mpOpen');
+      const closeBtn = document.getElementById('mpClose');
+      const hostBtn = document.getElementById('mpStartHost');
+      const joinBtn = document.getElementById('mpJoin');
+      const o = document.getElementById('mpOverlay');
+      openBtn?.addEventListener('click', ()=>{ o.style.display='block'; });
+      closeBtn?.addEventListener('click', ()=>{ o.style.display='none'; });
+      hostBtn?.addEventListener('click', ()=>{
+        const id = (document.getElementById('mpMyId').value||'player_'+Math.floor(Math.random()*9999)).trim();
+        startHosting(id);
+      });
+      joinBtn?.addEventListener('click', ()=>{
+        const myId = (document.getElementById('mpMyId').value||'player_'+Math.floor(Math.random()*9999)).trim();
+        const hostId = (document.getElementById('mpHostId').value||'').trim();
+        if (!hostId) { mpLog('Enter a host ID'); return; }
+        joinHost(myId, hostId);
+      });
+    })();
+
+    // Broadcast state at ~10 Hz
+    setInterval(()=>{
+      if (!MP.peer || (MP.conns.size===0)) return;
+      try{
+        const p = playerBody.position; const v = playerBody.velocity; const q = camera.quaternion;
+        broadcast({ t:'state', px:p.x, py:p.y, pz:p.z, vx:v.x, vy:v.y, vz:v.z, qx:q.x, qy:q.y, qz:q.z, qw:q.w, ts: performance.now() });
+      }catch(_){ }
+    }, 100);
 
       // subtle ambient motes around player
       try{
